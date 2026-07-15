@@ -102,7 +102,7 @@ def preprocess_data(cfg):
     logger.info('Preprocessing data...')
     tf      = cfg['timeframe']
     symbols = cfg['symbols']
-    os.makedirs(f'./data/processed/{tf}', exist_ok=True)
+    os.makedirs(f'./data/processed', exist_ok=True)
 
     for symbol in symbols:
         try:
