@@ -11,9 +11,9 @@ from binance.client import Client
 from binance.enums import *
 
 class CryptoDataset(Dataset):
-    def __init__(self, cfg, mode='train'):
+    def __init__(self, cfg, mode='training'):
         logger = logging.getLogger(cfg['experiment_name'])
-        logger.info(f'Initializing CryptoDataset. Mode: {mode}. Window size: {cfg['data']['lookback_window_size']}')
+        logger.info(f'Initializing CryptoDataset. Mode: {mode}. Window size: {cfg['data']['window_size']}')
 
         self.samples        = []
         self.targets        = []
@@ -36,7 +36,7 @@ class CryptoDataset(Dataset):
         
         self.samples = torch.concatenate(tuple(self.samples))
         self.targets = torch.concatenate(tuple(self.targets))
-        logger.info(f"Dataset created! Mode: {mode}. Number of points: {len(self.samples.size(0)):,}")
+        logger.info(f"Dataset created! Mode: {mode}. Number of Sequences: {self.samples.size(0):,}")
 
     def __len__(self):
         return self.samples.size(0)

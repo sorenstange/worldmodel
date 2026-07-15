@@ -3,6 +3,7 @@ experiment_name: worldmodel
 data:
   symbols:
     - 'BTCUSDT'
+    - 'ETHUSDT'
   timeframe: '1m'
   sequence_length: 64
   stride: 32
