@@ -1,6 +1,74 @@
 import torch
 import torch.nn as nn
 
+class Predictor(nn.module):
+    def __init__(self, d_model, num_layers, num_heads, max_len, dropout = 0.1):
+        super().__init__()
+        self.pe = PositionalEncoding(d_model, max_len)
+        self.layers = nn.ModuleList([
+            TransformerEncoderLayer(d_model = d_model, 
+                                    num_heads = num_heads,
+                                    dim_ff = d_model * 2, 
+                                    dropout = dropout) 
+                                    for _ in range(num_layers)
+                                    ])
+
+    def forward(self, x):
+        if x.dim() < 3:
+            x = x.unsqueeze(0)
+        _, seq_len, _ = x.shape
+        mask = self.create_causal_mask(seq_len)
+
+        x = self.pe(x)
+        for layer in self.layers:
+            x = layer(x, mask)
+
+        return x
+
+    def create_causal_mask(self, seq_len):
+        return torch.tril(torch.ones(seq_len, seq_len))
+
+class Encoder(nn.Module):
+    def __init__(self, input_dim, d_model, num_layers, num_heads, max_len, dropout = 0.1):
+        super().__init__()
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model)) 
+
+        self.embedding = Embedding(input_dim, d_model)
+        self.pe = PositionalEncoding(d_model, max_len)
+        
+        self.layers = nn.ModuleList([
+            TransformerEncoderLayer(d_model = d_model, 
+                                    num_heads = num_heads,
+                                    dim_ff = d_model * 2, 
+                                    dropout = dropout) 
+                                    for _ in range(num_layers)
+                                    ])
+
+    def forward(self, x):
+        if x.dim() < 3:
+            x = x.unsqueeze(0)
+        batch, _, _ = x.size()
+        cls_tokens = self.cls_token.expand(batch, -1, -1)
+
+        x = self.embedding(x)
+        x = torch.cat((cls_tokens, x), dim=1) 
+        x = self.pe(x)
+
+        for layer in self.layers:
+            x = layer(x)
+        
+        x = x[:, 0, :]
+
+        return x
+
+class Embedding(nn.Module):
+    def __init__(self, input_dim, d_model):
+        super().__init__()
+        self.projection = nn.Linear(input_dim, d_model)
+
+    def forward(self, x):
+        return self.projection(x)
+
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len):
         super().__init__()
