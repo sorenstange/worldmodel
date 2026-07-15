@@ -120,7 +120,7 @@ def preprocess_data(cfg):
                 df[col] = (df[col] - mu) / (std + 1e-8)
 
             df['Volume'] = np.log1p(df['Volume'])
-            df['Volume'] = (df['Volume'] - df['Volume'].rolling(window = cfg['normalization_window']).mean()) / (df['Volume'].rolling(window = cfg['normalization_window_size']).std() + 1e-8)
+            df['Volume'] = (df['Volume'] - df['Volume'].rolling(window = cfg['normalization_window']).mean()) / (df['Volume'].rolling(window = cfg['normalization_window']).std() + 1e-8)
             
             df['Volatility'] = std / mu
 
