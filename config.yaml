@@ -4,6 +4,8 @@ data:
   symbols:
     - 'BTCUSDT'
   timeframe: '1m'
+  sequence_length: 64
+  stride: 32
   window_size: 15
   normalization_window: 200
   training_interval: 

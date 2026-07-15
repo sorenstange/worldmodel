@@ -14,48 +14,49 @@ class CryptoDataset(Dataset):
     def __init__(self, cfg, mode='train'):
         logger = logging.getLogger(cfg['experiment_name'])
         logger.info(f'Initializing CryptoDataset. Mode: {mode}. Window size: {cfg['data']['lookback_window_size']}')
-        self.window_size    = cfg['data']['lookback_window']
 
         self.samples        = []
         self.targets        = []
-        self.datasets_start = []
-        self.start_indices  = []
 
         data, targets = load_data(cfg, mode)
 
-        n_samples = 0
         for d, t in zip(data, targets):
-            idx = np.arange(self.window_size, d.shape[0])
-            self.start_indices.append(idx)
-            self.datasets_start.append(n_samples)
-            n_samples += len(idx)
+            d = torch.from_numpy(d)
+            t = torch.from_numpy(t)
 
-            for j in idx:
-                self.samples.append(torch.FloatTensor(d[j - self.window_size:j, :]))
-                self.targets.append(torch.FloatTensor([t[j]]))
-                
-        logger.info(f"Dataset created! Mode: {mode}. Number of points: {len(self.samples):,}")
+            d = d.unfold(0, cfg['data']['window_size'], cfg['data']['window_size']).transpose(1, 2)
+            d = d.unfold(0, cfg['data']['sequence_length'], cfg['data']['stride']).permute(0, 3, 1, 2)
+            
+            t = (t + 1.).unfold(0, cfg['data']['window_size'], cfg['data']['window_size'])
+            t = (t.cumprod(1) - 1.)[:,-1]
+            t = t.unfold(0, cfg['data']['sequence_length'], cfg['data']['stride'])
+
+            self.samples.append(d)
+            self.targets.append(t)
+        
+        self.samples = torch.concatenate(tuple(self.samples))
+        self.targets = torch.concatenate(tuple(self.targets))
+        logger.info(f"Dataset created! Mode: {mode}. Number of points: {len(self.samples.size(0)):,}")
 
     def __len__(self):
-        return len(self.samples)
+        return self.samples.size(0)
 
     def __getitem__(self, idx):
-        return {'sample' : self.samples[idx], 'target' : self.targets[idx]}
+        return {'sample' : self.samples[idx, :], 'target' : self.targets[idx, :]}
 
-def load_data(cfg, mode = 'train'):
+def load_data(cfg, mode = 'training'):
     cfg     = cfg['data']
-    tf      = cfg['timeframe']
-    symbol  = cfg['symbol']
+    symbols  = cfg['symbols']
 
     data, targets = [], []
+    for symbol in symbols:
+        df = pd.read_csv(f'./data/processed/{symbol}.csv')
+        df.set_index('OpenTime', inplace = True)
+    
+        df = df[((df.index >= cfg[f'{mode}_interval'][0]) & (df.index < cfg[f'{mode}_interval'][1]))]
 
-    df = pd.read_csv(f'./data/processed/{symbol}.csv')
-    df.set_index('OpenTime', inplace = True)
-  
-    df = df[((df.index >= cfg[f'{mode}_interval'][0]) & (df.index < cfg[f'{mode}_interval'][1]))]
-
-    data.append(df.drop('Return', axis = 1).values.astype(np.float32))
-    targets.append(df['Return'].shift(-1).fillna(0).values.astype(np.float32))
+        data.append(df.drop('Return', axis = 1).values.astype(np.float32))
+        targets.append(df['Return'].values.astype(np.float32))
 
     return data, targets
 
