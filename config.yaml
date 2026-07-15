@@ -1,4 +1,26 @@
+experiment_name: worldmodel
 
 data:
+  symbols:
+  timeframe: '1m'
+  window_size: 15
+  normalization_window: 200
+  training_interval: 
+    - '2018-01-01 00:00'
+    - '2025-01-01 00:00'
+  validation_interval:
+    - '2025-01-01 00:00'
+    - '2026-01-01 00:00'
+  test_interval:
+    - '2026-01-01 00:00'
+    - '2026-06-01 00:00'
 
 model:
+  encoder:
+
+  predictor:
+
+  actor:
+
+  critic:
+  
