@@ -14,7 +14,7 @@ class CryptoDataset(Dataset):
     def __init__(self, cfg, mode='train'):
         logger = logging.getLogger(cfg['experiment_name'])
         logger.info(f'Initializing CryptoDataset. Mode: {mode}. Window size: {cfg['data']['lookback_window_size']}')
-        self.window_size    = cfg['data']['lookback_window_size']
+        self.window_size    = cfg['data']['lookback_window']
 
         self.samples        = []
         self.targets        = []
@@ -72,7 +72,7 @@ def update_data(cfg):
 
     for symbol in symbols:
         try:
-            path = f'./src/autotrader/LeWM/data/raw/{tf}/{symbol}.csv'
+            path = f'./data/raw/{tf}/{symbol}.csv'
             if not os.path.exists(path): # We need to download the data
                 logger.info(f'Data for {symbol} {tf} does not exists... Downloading data...')
                 df = get_OHLCV(symbol, tf, SINCE = start_date, TO = end_date)
