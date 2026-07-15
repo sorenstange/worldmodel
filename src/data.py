@@ -49,7 +49,7 @@ def load_data(cfg, mode = 'train'):
 
     data, targets = [], []
 
-    df = pd.read_csv(f'./data/processed/{tf}/{symbol}.csv')
+    df = pd.read_csv(f'./data/processed/{symbol}.csv')
     df.set_index('OpenTime', inplace = True)
   
     df = df[((df.index >= cfg[f'{mode}_interval'][0]) & (df.index < cfg[f'{mode}_interval'][1]))]
@@ -64,15 +64,15 @@ def update_data(cfg):
     logger.info('Updating data...')
     cfg = cfg['data']
     tf  = cfg['timeframe']
-    symbols = cfg['symbol']
+    symbols = cfg['symbols']
 
-    start_date  = min([min(cfg[period]) for period in ['train_interval', 'val_interval', 'test_interval']])
-    end_date    = max([max(cfg[period]) for period in ['train_interval', 'val_interval', 'test_interval']])
-    os.makedirs(f'./data/raw/{tf}', exist_ok=True)
+    start_date  = min([min(cfg[period]) for period in ['training_interval', 'validation_interval', 'test_interval']])
+    end_date    = max([max(cfg[period]) for period in ['training_interval', 'validation_interval', 'test_interval']])
+    os.makedirs(f'./data/raw', exist_ok=True)
 
     for symbol in symbols:
         try:
-            path = f'./data/raw/{tf}/{symbol}.csv'
+            path = f'./data/raw/{symbol}.csv'
             if not os.path.exists(path): # We need to download the data
                 logger.info(f'Data for {symbol} {tf} does not exists... Downloading data...')
                 df = get_OHLCV(symbol, tf, SINCE = start_date, TO = end_date)
@@ -101,13 +101,13 @@ def preprocess_data(cfg):
     cfg = cfg['data']
     logger.info('Preprocessing data...')
     tf      = cfg['timeframe']
-    symbols = cfg['symbol']
+    symbols = cfg['symbols']
     os.makedirs(f'./data/processed/{tf}', exist_ok=True)
 
     for symbol in symbols:
         try:
             logger.info(f'Preprocessing {symbol} {tf}')
-            path = f'./data/raw/{tf}/{symbol}.csv'
+            path = f'./data/raw/{symbol}.csv'
             df = pd.read_csv(path)
             df.set_index('OpenTime', inplace = True)
             df.sort_index(inplace = True)
@@ -127,7 +127,7 @@ def preprocess_data(cfg):
             df.dropna(inplace=True)
             df = df[['Open', 'High', 'Low', 'Close', 'Volume', 'Volatility', 'Return']].copy()
 
-            path = f'./data/processed/{tf}/{symbol}.csv'
+            path = f'./data/processed/{symbol}.csv'
             df.to_csv(path)
         except Exception as e:
             logger.error(f'Error at {symbol}: {e}')   
@@ -165,7 +165,7 @@ def get_OHLCV(SYMBOL : str, TIMEFRAME : str, SINCE : str = '2018-01-01 00:00', T
     return df
 
 def main(cfg):
-    from src.util import set_logger
+    from util import set_logger
     logger = set_logger(cfg)
     logger.info('Starting data pipeline')
     update_data(cfg)

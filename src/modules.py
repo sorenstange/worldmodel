@@ -1,6 +1,21 @@
 import torch
 import torch.nn as nn
 
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len):
+        super().__init__()
+        self.embedding = nn.Embedding(max_len, d_model)
+
+    def forward(self, x, offset=0):
+        seq_len = x.size(1)
+        positions = torch.arange(
+            offset,
+            offset + seq_len,
+            device=x.device
+        )
+        pos = self.embedding(positions)
+        return x + pos.unsqueeze(0)
+
 class SIGReg(torch.nn.Module):
     def __init__(self, knots=17, num_proj=1024):
         super().__init__()
