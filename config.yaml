@@ -2,6 +2,7 @@ experiment_name: worldmodel
 
 data:
   symbols:
+    - 'BTCUSDT'
   timeframe: '1m'
   window_size: 15
   normalization_window: 200
@@ -23,4 +24,4 @@ model:
   actor:
 
   critic:
-  
+
