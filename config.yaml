@@ -4,10 +4,15 @@ data:
   symbols:
     - 'BTCUSDT'
     - 'ETHUSDT'
+    - 'SOLUSDT'
+    - 'XRPUSDT'
   timeframe: '1m'
   sequence_length: 64
   stride: 32
   window_size: 15
+  num_bins: 256
+  extreme_value: 0.15
+  sigma: 0.8
   normalization_window: 200
   training_interval: 
     - '2018-01-01 00:00'

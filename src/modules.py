@@ -61,6 +61,7 @@ class Encoder(nn.Module):
 
         return x
 
+
 class Embedding(nn.Module):
     def __init__(self, input_dim, d_model):
         super().__init__()
@@ -68,6 +69,7 @@ class Embedding(nn.Module):
 
     def forward(self, x):
         return self.projection(x)
+
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len):
@@ -83,6 +85,7 @@ class PositionalEncoding(nn.Module):
         )
         pos = self.embedding(positions)
         return x + pos.unsqueeze(0)
+
 
 class SIGReg(torch.nn.Module):
     def __init__(self, knots=17, num_proj=1024):
@@ -109,6 +112,7 @@ class SIGReg(torch.nn.Module):
         err = (x_t.cos().mean(-3) - self.phi).square() + x_t.sin().mean(-3).square()
         statistic = (err @ self.weights) * proj.size(-2)
         return statistic.mean() # average over projections and time
+
 
 class MultiHeadSelfAttention(nn.Module):
     def __init__(self, d_model, num_heads, dropout=0.1):

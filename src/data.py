@@ -10,6 +10,8 @@ from torch.utils.data import Dataset
 from binance.client import Client
 from binance.enums import *
 
+from util import gaussian_label_smoothing
+
 class CryptoDataset(Dataset):
     def __init__(self, cfg, mode='training'):
         logger = logging.getLogger(cfg['experiment_name'])
@@ -36,6 +38,20 @@ class CryptoDataset(Dataset):
         
         self.samples = torch.concatenate(tuple(self.samples))
         self.targets = torch.concatenate(tuple(self.targets))
+
+        B, Seq = self.targets.shape
+        t = self.targets.view(B*Seq)
+
+        self.min_val, self.max_val = -cfg['data']['extreme_value'], cfg['data']['extreme_value']
+        t = t.clamp(self.min_val, self.max_val)
+
+        self.bin_edges = torch.linspace(self.min_val, self.max_val + 1e-5, cfg['data']['num_bins'] + 1)
+        t = torch.bucketize(t, self.bin_edges) - 1
+        t = torch.clamp(t, 0, cfg['data']['num_bins'] - 1)
+
+        t = gaussian_label_smoothing(t, cfg['data']['num_bins'], cfg['data']['sigma'])
+        self.targets = t.view(B, Seq, -1)
+
         logger.info(f"Dataset created! Mode: {mode}. Number of Sequences: {self.samples.size(0):,}")
 
     def __len__(self):
