@@ -100,8 +100,6 @@ class JEPA(L.LightningModule):
         self.log('val_sigreg_loss', L_sigreg, on_step=False, on_epoch=True)
         self.log('val_loss', L, on_step=False, on_epoch=True, prog_bar=True)
 
-
-
     def configure_optimizers(self):
         return optim.AdamW(self.parameters(), lr=self.lr)
     
