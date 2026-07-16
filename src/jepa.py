@@ -9,6 +9,7 @@ from modules import *
 class JEPA(L.LightningModule):
     def __init__(self, cfg):
         super().__init__()
+        self.save_hyperparameters(cfg)
         self.encoder = Encoder(
             input_dim = cfg['jepa']['input_dim'],
             d_model = cfg['jepa']['d_model'],
@@ -76,8 +77,6 @@ class JEPA(L.LightningModule):
         self.log('train_sigreg_loss', L_sigreg)
         self.log('train_loss', L)
         return L
-        
-        
     
     def validation_step(self, batch, batch_idx):
         X, y = batch
@@ -95,7 +94,7 @@ class JEPA(L.LightningModule):
         L_sigreg = self.SIGRegLoss(Z.permute(1, 0, 2))
 
         L = L_state + self.lam_KLD * L_kld + self.lam_SIGReg * L_sigreg
-        
+
         self.log('val_state_loss', L_state, on_step=False, on_epoch=True)
         self.log('val_kld_loss', L_kld, on_step=False, on_epoch=True)
         self.log('val_sigreg_loss', L_sigreg, on_step=False, on_epoch=True)
@@ -105,3 +104,41 @@ class JEPA(L.LightningModule):
 
     def configure_optimizers(self):
         return optim.AdamW(self.parameters(), lr=self.lr)
+    
+if __name__ == '__main__':
+    from omegaconf import OmegaConf
+    from lightning.pytorch.loggers import WandbLogger
+    from torch.utils.data import DataLoader
+    from data import CryptoDataset
+
+    cfg = OmegaConf.load('./config.yaml')
+
+    train_dataset = CryptoDataset(cfg, mode = 'training')
+    val_dataset = CryptoDataset(cfg, mode = 'validation')
+
+    train_loader = DataLoader(train_dataset, 
+                              batch_size = cfg['jepa']['training']['batch_size'],
+                              shuffle = True)
+    val_loader = DataLoader(val_dataset, 
+                              batch_size = cfg['jepa']['training']['batch_size'],
+                              shuffle = False)
+    
+    model = JEPA(cfg)
+
+    wandb_logger = WandbLogger(
+        project="mit-jepa-projekt",  # Navnet på dit projekt i WandB
+        name="jepa-run-1",            # Navnet på dette specifikke eksperiment
+    )
+
+    trainer = L.Trainer(
+        max_epochs = cfg['jepa']['training']['epochs'],
+        accelerator = "auto", 
+        devices = "auto",
+        logger = wandb_logger,
+        log_every_n_steps = cfg['jepa']['training']['log_every_n_steps']
+    )
+
+    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+
+
+    

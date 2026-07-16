@@ -41,4 +41,8 @@ jepa:
     lam_SIGReg: 0.1
     lam_KLD: 0.4
     lr: 0.001
+    training:
+      epochs: 100
+      batch_size: 32
+      log_every_n_steps: 10
 

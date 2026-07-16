@@ -14,6 +14,7 @@ dependencies = [
     "python-binance>=1.0.37",
     "requests>=2.34.2",
     "torch>=2.13.0",
+    "wandb>=0.28.0",
 ]
 [tool.setuptools.packages.find]
 where = ["src"] 
