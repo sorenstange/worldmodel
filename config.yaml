@@ -24,12 +24,21 @@ data:
     - '2026-01-01 00:00'
     - '2026-06-01 00:00'
 
-model:
-  encoder:
-
-  predictor:
-
-  actor:
-
-  critic:
+jepa:
+    input_dim: 6 # [Open, High, Low, Close, Volume, Volatility]
+    d_model: 2048
+    encoder:
+      num_layers: 12
+      num_heads: 4
+      max_len: ${oc.select:data.window_size + 1}
+      dropout: 0.1
+    predictor:
+      num_layers: 14
+      num_heads: 4
+      max_len: ${$data.sequence_length}
+      num_bins: ${$data.num_bins}
+      dropout: 0.1
+    lam_SIGReg: 0.1
+    lam_KLD: 0.4
+    lr: 0.001
 

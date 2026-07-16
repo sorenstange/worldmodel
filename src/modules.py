@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 class Predictor(nn.module):
-    def __init__(self, d_model, num_layers, num_heads, max_len, dropout = 0.1):
+    def __init__(self, d_model, num_layers, num_heads, max_len, num_bins, dropout = 0.1):
         super().__init__()
         self.pe = PositionalEncoding(d_model, max_len)
         self.layers = nn.ModuleList([
@@ -12,9 +12,14 @@ class Predictor(nn.module):
                                     dropout = dropout) 
                                     for _ in range(num_layers)
                                     ])
+        self.return_head = nn.Sequential(
+            nn.Linear(d_model, 2*d_model),
+            nn.SiLU(),
+            nn.Linear(2*d_model, num_bins)
+        )
 
     def forward(self, x):
-        if x.dim() < 3:
+        if x.dim() == 3:
             x = x.unsqueeze(0)
         _, seq_len, _ = x.shape
         mask = self.create_causal_mask(seq_len)
@@ -23,7 +28,7 @@ class Predictor(nn.module):
         for layer in self.layers:
             x = layer(x, mask)
 
-        return x
+        return x, self.return_head(x)
 
     def create_causal_mask(self, seq_len):
         return torch.tril(torch.ones(seq_len, seq_len))
