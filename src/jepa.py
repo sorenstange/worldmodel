@@ -65,11 +65,17 @@ class JEPA(L.LightningModule):
         Z_in = Z[:, :-1]
         Z_target = Z[:, 1:]
 
-        Z_hat, logits = self.predict(Z_in)
-        log_probs = F.log_softmax(logits, dim=1)
+        Z_hat, logits = self.predict(Z_in)  # logits shape: [B, Seq-1, bins]
+
+        log_probs = F.log_softmax(logits, dim=-1)
+
+        y_target = y[:, 1:]  # Form: [B, Seq-1, bins]
+
+        log_probs_flat = log_probs.reshape(-1, log_probs.size(-1))
+        y_target_flat = y_target.reshape(-1, y_target.size(-1))
 
         L_state = self.MSELoss(Z_hat, Z_target)
-        L_kld = self.KLDLoss(log_probs, y[:,1:])
+        L_kld = self.KLDLoss(log_probs_flat, y_target_flat) # Bruger nu de fladtrykte versioner
         L_sigreg = self.SIGRegLoss(Z.permute(1, 0, 2))
 
         L = L_state + self.lam_KLD * L_kld + self.lam_SIGReg * L_sigreg
@@ -79,6 +85,7 @@ class JEPA(L.LightningModule):
         self.log('train_sigreg_loss', L_sigreg)
         self.log('train_loss', L)
         return L
+
     
     def validation_step(self, batch, batch_idx):
         X, y = batch['sample'], batch['target']
@@ -88,11 +95,15 @@ class JEPA(L.LightningModule):
         Z_target = Z[:, 1:]
 
         Z_hat, logits = self.predict(Z_in)
-        log_probs = F.log_softmax(logits, dim=1)
+        log_probs = F.log_softmax(logits, dim=-1)
 
-        # Beregn tab (samme formler som i træning)
+        y_target = y[:, 1:]  # Form: [B, Seq-1, bins]
+
+        log_probs_flat = log_probs.reshape(-1, log_probs.size(-1))
+        y_target_flat = y_target.reshape(-1, y_target.size(-1))
+
         L_state = self.MSELoss(Z_hat, Z_target)
-        L_kld = self.KLDLoss(log_probs, y[:,1:])
+        L_kld = self.KLDLoss(log_probs_flat, y_target_flat) # Bruger nu de fladtrykte versioner
         L_sigreg = self.SIGRegLoss(Z.permute(1, 0, 2))
 
         L = L_state + self.lam_KLD * L_kld + self.lam_SIGReg * L_sigreg
@@ -105,7 +116,7 @@ class JEPA(L.LightningModule):
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=self.lr)
         
-        total_steps = self.trainer.estimated_stepping_steps
+        total_steps = self.trainer.estimated_stepping_batches
         
         num_warmup_steps = int(total_steps * 0.1) 
         
