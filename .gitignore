@@ -9,6 +9,7 @@ wheels/
 # Virtual environments
 .venv
 .env
+.github_key
 data
 models
 outputs
