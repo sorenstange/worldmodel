@@ -2,7 +2,8 @@
 
 ### General options
 ### –- specify queue --
-#BSUB -q gpuv100
+#BSUB -q gpua100
+#BSUB -R "select[gpu40gb]"
 
 ### -- set the job Name --
 #BSUB -J train_jepa

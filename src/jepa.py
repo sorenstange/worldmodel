@@ -59,7 +59,7 @@ class JEPA(L.LightningModule):
         return self.predict(Z)
 
     def training_step(self, batch, batch_idx):
-        X, y = batch
+        X, y = batch['sample'], batch['target']
         Z = self.encode(X)
 
         Z_in = Z[:, :-1]
@@ -69,7 +69,7 @@ class JEPA(L.LightningModule):
         log_probs = F.log_softmax(logits, dim=1)
 
         L_state = self.MSELoss(Z_hat, Z_target)
-        L_kld = self.KLDLoss(log_probs, y)
+        L_kld = self.KLDLoss(log_probs, y[:,1:])
         L_sigreg = self.SIGRegLoss(Z.permute(1, 0, 2))
 
         L = L_state + self.lam_KLD * L_kld + self.lam_SIGReg * L_sigreg
@@ -81,7 +81,7 @@ class JEPA(L.LightningModule):
         return L
     
     def validation_step(self, batch, batch_idx):
-        X, y = batch
+        X, y = batch['sample'], batch['target']
         Z = self.encode(X)
 
         Z_in = Z[:, :-1]
@@ -92,7 +92,7 @@ class JEPA(L.LightningModule):
 
         # Beregn tab (samme formler som i træning)
         L_state = self.MSELoss(Z_hat, Z_target)
-        L_kld = self.KLDLoss(log_probs, y)
+        L_kld = self.KLDLoss(log_probs, y[:,1:])
         L_sigreg = self.SIGRegLoss(Z.permute(1, 0, 2))
 
         L = L_state + self.lam_KLD * L_kld + self.lam_SIGReg * L_sigreg
@@ -105,7 +105,7 @@ class JEPA(L.LightningModule):
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=self.lr)
         
-        total_steps = self.trainer.estimated_stepping_steps
+        total_steps = self.trainer.estimated_stepping_batches
         
         num_warmup_steps = int(total_steps * 0.1) 
         
@@ -125,6 +125,7 @@ class JEPA(L.LightningModule):
         }
     
 if __name__ == '__main__':
+    import wandb
     from omegaconf import OmegaConf
     from lightning.pytorch.loggers import WandbLogger
     from torch.utils.data import DataLoader
@@ -132,20 +133,27 @@ if __name__ == '__main__':
     from dotenv import load_dotenv
 
     from data import CryptoDataset
+    from util import set_logger
 
     load_dotenv()
+    wandb.login()
 
     cfg = OmegaConf.load('./config.yaml')
+
+    logger = set_logger(cfg)
+    logger.info('Starting JEPA training')
 
     train_dataset = CryptoDataset(cfg, mode = 'training')
     val_dataset = CryptoDataset(cfg, mode = 'validation')
 
     train_loader = DataLoader(train_dataset, 
                               batch_size = cfg['jepa']['training']['batch_size'],
-                              shuffle = True)
+                              shuffle = True,
+                              num_workers = 3)
     val_loader = DataLoader(val_dataset, 
                               batch_size = cfg['jepa']['training']['batch_size'],
-                              shuffle = False)
+                              shuffle = False,
+                              num_workers = 3)
     
     model = JEPA(cfg)
 
@@ -174,6 +182,7 @@ if __name__ == '__main__':
         max_epochs = cfg['jepa']['training']['epochs'],
         accelerator = "auto", 
         devices = "auto",
+        accumulate_grad_batches = 4,
         logger = wandb_logger,
         callbacks = [checkpoint_callback, early_stop_callback],
         log_every_n_steps = cfg['jepa']['training']['log_every_n_steps']

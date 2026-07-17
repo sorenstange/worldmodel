@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-class Predictor(nn.module):
+class Predictor(nn.Module):
     def __init__(self, d_model, num_layers, num_heads, max_len, num_bins, dropout = 0.1):
         super().__init__()
         self.pe = PositionalEncoding(d_model, max_len)
@@ -19,10 +19,10 @@ class Predictor(nn.module):
         )
 
     def forward(self, x):
-        if x.dim() == 3:
+        if x.dim() == 2:
             x = x.unsqueeze(0)
         _, seq_len, _ = x.shape
-        mask = self.create_causal_mask(seq_len)
+        mask = self.create_causal_mask(seq_len).to(x.device)
 
         x = self.pe(x)
         for layer in self.layers:
