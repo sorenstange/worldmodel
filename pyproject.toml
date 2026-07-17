@@ -12,8 +12,10 @@ dependencies = [
     "omegaconf>=2.3.1",
     "pandas>=3.0.3",
     "python-binance>=1.0.37",
+    "python-dotenv>=1.2.2",
     "requests>=2.34.2",
     "torch>=2.13.0",
+    "transformers>=5.14.1",
     "wandb>=0.28.0",
 ]
 [tool.setuptools.packages.find]

@@ -4,6 +4,8 @@ import torch.optim as optim
 import torch.nn.functional as F
 import lightning as L
 
+from transformers import get_cosine_schedule_with_warmup
+
 from modules import *
 
 class JEPA(L.LightningModule):
@@ -101,13 +103,37 @@ class JEPA(L.LightningModule):
         self.log('val_loss', L, on_step=False, on_epoch=True, prog_bar=True)
 
     def configure_optimizers(self):
-        return optim.AdamW(self.parameters(), lr=self.lr)
+        optimizer = optim.AdamW(self.parameters(), lr=self.lr)
+        
+        total_steps = self.trainer.estimated_stepping_steps
+        
+        num_warmup_steps = int(total_steps * 0.1) 
+        
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer=optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=total_steps
+        )
+    
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1
+            }
+        }
     
 if __name__ == '__main__':
     from omegaconf import OmegaConf
     from lightning.pytorch.loggers import WandbLogger
     from torch.utils.data import DataLoader
+    from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
+    from dotenv import load_dotenv
+
     from data import CryptoDataset
+
+    load_dotenv()
 
     cfg = OmegaConf.load('./config.yaml')
 
@@ -124,8 +150,24 @@ if __name__ == '__main__':
     model = JEPA(cfg)
 
     wandb_logger = WandbLogger(
-        project="mit-jepa-projekt",  # Navnet på dit projekt i WandB
-        name="jepa-run-1",            # Navnet på dette specifikke eksperiment
+        entity='rudyhuy',
+        project='worldmodel' 
+    )
+
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=f"./models/{wandb_logger.experiment.name}/", # Gemmer i ./models/{run_name}/
+        filename="jepa-{epoch:02d}-{val_loss:.4f}",
+        monitor="val_loss",
+        mode="min",
+        save_top_k=1,
+        save_last=True
+    )
+
+    early_stop_callback = EarlyStopping(
+        monitor="val_loss",
+        patience=5,             # Stop hvis val_loss ikke falder i 5 sammenhængende epoker
+        mode="min",
+        verbose=True
     )
 
     trainer = L.Trainer(
@@ -133,6 +175,7 @@ if __name__ == '__main__':
         accelerator = "auto", 
         devices = "auto",
         logger = wandb_logger,
+        callbacks = [checkpoint_callback, early_stop_callback],
         log_every_n_steps = cfg['jepa']['training']['log_every_n_steps']
     )
 
