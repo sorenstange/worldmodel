@@ -70,7 +70,8 @@ def load_data(cfg, mode = 'training'):
         df.set_index('OpenTime', inplace = True)
     
         df = df[((df.index >= cfg[f'{mode}_interval'][0]) & (df.index < cfg[f'{mode}_interval'][1]))]
-
+        if len(df) == 0:
+            continue
         data.append(df.drop('Return', axis = 1).values.astype(np.float32))
         targets.append(df['Return'].values.astype(np.float32))
 
