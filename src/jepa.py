@@ -105,7 +105,7 @@ class JEPA(L.LightningModule):
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=self.lr)
         
-        total_steps = self.trainer.estimated_stepping_batches
+        total_steps = self.trainer.estimated_stepping_steps
         
         num_warmup_steps = int(total_steps * 0.1) 
         
@@ -164,7 +164,7 @@ if __name__ == '__main__':
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=f"./models/{wandb_logger.experiment.name}/", # Gemmer i ./models/{run_name}/
-        filename="jepa-{epoch:02d}-{val_loss:.4f}",
+        filename="jepa",
         monitor="val_loss",
         mode="min",
         save_top_k=1,
@@ -173,8 +173,9 @@ if __name__ == '__main__':
 
     early_stop_callback = EarlyStopping(
         monitor="val_loss",
-        patience=5,             # Stop hvis val_loss ikke falder i 5 sammenhængende epoker
+        patience=5,
         mode="min",
+        check_on_train_epoch_end=False, # Vent altid til valideringen er HELT færdig
         verbose=True
     )
 
