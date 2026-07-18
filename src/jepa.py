@@ -84,6 +84,7 @@ class JEPA(L.LightningModule):
         self.log('train_kld_loss', L_kld)
         self.log('train_sigreg_loss', L_sigreg)
         self.log('train_loss', L)
+
         return L
 
     
@@ -140,7 +141,7 @@ if __name__ == '__main__':
     from omegaconf import OmegaConf
     from lightning.pytorch.loggers import WandbLogger
     from torch.utils.data import DataLoader
-    from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
+    from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
     from dotenv import load_dotenv
 
     from data import CryptoDataset
@@ -179,7 +180,8 @@ if __name__ == '__main__':
         monitor="val_loss",
         mode="min",
         save_top_k=1,
-        save_last=True
+        save_last=True,
+        save_weights_only=True
     )
 
     early_stop_callback = EarlyStopping(
@@ -190,13 +192,16 @@ if __name__ == '__main__':
         verbose=True
     )
 
+    lr_monitor = LearningRateMonitor(logging_interval='step')
+
     trainer = L.Trainer(
         max_epochs = cfg['jepa']['training']['epochs'],
         accelerator = "auto", 
         devices = "auto",
         accumulate_grad_batches = 4,
+        gradient_clip_val = 1.0,
         logger = wandb_logger,
-        callbacks = [checkpoint_callback, early_stop_callback],
+        callbacks = [checkpoint_callback, early_stop_callback, lr_monitor],
         log_every_n_steps = cfg['jepa']['training']['log_every_n_steps']
     )
 
