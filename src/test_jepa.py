@@ -60,7 +60,7 @@ def run_trajectory(checkpoint_path, cfg, horizon=15):
     return Z_true_segments[0], predicted_trajectory[0], y_true_segments[0], predicted_logits[0], test_dataset
 
 if __name__ == '__main__':
-    CHECKPOINT = "./models/treasured-dawn-25/jepa.ckpt" 
+    CHECKPOINT = "./models/glad-donkey-38/jepa.ckpt" 
     CONFIG = "./config.yaml"
     horizon = 15
 
@@ -71,7 +71,7 @@ if __name__ == '__main__':
 
     # 1. Beregn MSE i det latente rum
     MSE = np.mean((Z_true - Z_pred) ** 2)
-    logger.info(f'Avg. MSE in the latent space over {horizon} steps: {MSE:.4f}')
+    logger.info(f'MSE in the latent space over {horizon} steps: {MSE:.4f}')
 
     # 2. Omregn logits til rigtige sandsynligheder (Softmax)
     # Y_pred_logits har formen [horizon, bins]
@@ -83,16 +83,11 @@ if __name__ == '__main__':
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
     bin_centers = bin_centers.cpu().numpy()
 
-    # 4. Beregn forventet (expected) afkast fra modellens sandsynligheder
-    # og find det sande afkast fra de sande bins (Y_true)
-    pred_returns = np.sum(Y_pred_probs * bin_centers, axis=-1)
-    
-    # Hvis Y_true er one-hot/smoothed, tager vi det vægtede gennemsnit eller argmax
-    true_bins = np.argmax(Y_true, axis=-1)
-    true_returns = bin_centers[true_bins]
+    pred_returns = np.argmax(Y_pred_probs, axis=-1)
+    pred_returns = bin_centers[pred_returns]
 
-    # 5. Beregn det kumulative afkast (cumprod)
-    # Finansielle afkast ganges op som: cumprod(1 + r)
+    true_returns = bin_centers[Y_true]
+
     true_cumprod = np.cumprod(1 + true_returns)
     pred_cumprod = np.cumprod(1 + pred_returns)
 
@@ -115,7 +110,7 @@ if __name__ == '__main__':
                     extent=[0.5, horizon + 0.5, 0, len(bin_centers) - 1])
     
     # Marker den korrekte (sande) bin med røde prikker hen over heatmappet
-    ax2.scatter(t_steps, true_bins, color='red', edgecolor='white', s=35, label='Sand Bin-placering', zorder=5)
+    ax2.scatter(t_steps, true_returns, color='red', edgecolor='white', s=35, label='Sand Bin-placering', zorder=5)
 
     ax2.set_title('Forudsagte Sandsynligheder (Heatmap) vs. Sande Pris-bins', fontsize=14)
     ax2.set_xlabel('Tidsskridt frem i tiden (Minutter)', fontsize=12)

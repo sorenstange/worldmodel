@@ -31,10 +31,10 @@ class JEPA(L.LightningModule):
 
         self.MSELoss = nn.MSELoss()
         self.SIGRegLoss = SIGReg()
-        self.KLDLoss = nn.KLDivLoss(reduction='batchmean')
+        self.CrossEntropyLoss = nn.CrossEntropyLoss()
 
         self.lam_SIGReg = cfg['jepa']['lam_SIGReg']
-        self.lam_KLD = cfg['jepa']['lam_KLD']
+        self.lam_CE = cfg['jepa']['lam_CE']
 
         self.lr = cfg['jepa']['lr']
 
@@ -67,21 +67,19 @@ class JEPA(L.LightningModule):
 
         Z_hat, logits = self.predict(Z_in)  # logits shape: [B, Seq-1, bins]
 
-        log_probs = F.log_softmax(logits, dim=-1)
+        y_target = y[:, 1:]  # Form: [B, Seq-1, 1]
 
-        y_target = y[:, 1:]  # Form: [B, Seq-1, bins]
-
-        log_probs_flat = log_probs.reshape(-1, log_probs.size(-1))
-        y_target_flat = y_target.reshape(-1, y_target.size(-1))
+        logits_flat = logits.reshape(-1, logits.size(-1))
+        y_target_flat = y_target.reshape(-1, y_target.size(-1)).squeeze(-1)
 
         L_state = self.MSELoss(Z_hat, Z_target)
-        L_kld = self.KLDLoss(log_probs_flat, y_target_flat) # Bruger nu de fladtrykte versioner
+        L_ce = self.CrossEntropyLoss(logits_flat, y_target_flat) # Bruger nu de fladtrykte versioner
         L_sigreg = self.SIGRegLoss(Z.permute(1, 0, 2))
 
-        L = L_state + self.lam_KLD * L_kld + self.lam_SIGReg * L_sigreg
+        L = L_state + self.lam_CE * L_ce + self.lam_SIGReg * L_sigreg
 
         self.log('train_state_loss', L_state)
-        self.log('train_kld_loss', L_kld)
+        self.log('train_ce_loss', L_ce)
         self.log('train_sigreg_loss', L_sigreg)
         self.log('train_loss', L)
 
@@ -90,29 +88,59 @@ class JEPA(L.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         X, y = batch['sample'], batch['target']
-        Z = self.encode(X)
+        Z = self.encode(X)  # Form: [B, Seq, d_model]
 
-        Z_in = Z[:, :-1]
-        Z_target = Z[:, 1:]
+        horizon = 15  # Hvor mange skridt vi vil drømme frem i tiden
+        
+        # Vi klipper historikken, så vi har 'horizon' antal sande skridt til slut at sammenligne med
+        start_idx = Z.size(1) - horizon - 1
+        Z_history = Z[:, :start_idx+1, :]  # Vores udgangspunkt (prompt)
 
-        Z_hat, logits = self.predict(Z_in)
-        log_probs = F.log_softmax(logits, dim=-1)
+        autoreg_losses = []
+        autoreg_kld_losses = []
 
-        y_target = y[:, 1:]  # Form: [B, Seq-1, bins]
+        # Autoregressiv løkke inde i valideringen
+        for t in range(horizon):
+            # Forudsig det næste skridt baseret på den historik, modellen SELV har opbygget
+            Z_next_pred, logits = self.predict(Z_history)
 
-        log_probs_flat = log_probs.reshape(-1, log_probs.size(-1))
-        y_target_flat = y_target.reshape(-1, y_target.size(-1))
+            # Hent de absolut nyeste forudsigelser for dette tidsskridt
+            new_Z_pred = Z_next_pred[:, -1:, :]
+            new_logits = logits[:, -1:, :]
 
-        L_state = self.MSELoss(Z_hat, Z_target)
-        L_kld = self.KLDLoss(log_probs_flat, y_target_flat) # Bruger nu de fladtrykte versioner
+            # Find de tilsvarende SANDE værdier på markedet for dette specifikke tidsskridt
+            target_t = start_idx + 1 + t
+            Z_target_t = Z[:, target_t:target_t+1, :]
+            y_target_t = y[:, target_t:target_t+1, :]
+
+            # Flad dimensionerne ud til vores tab-funktioner
+            logits_flat = new_logits.reshape(-1, new_logits.size(-1))
+            y_flat = y_target_t.reshape(-1, y_target_t.size(-1))
+
+            # Beregn tab for dette specifikke skridt i drømmen
+            L_state_t = self.MSELoss(new_Z_pred, Z_target_t)
+            L_kld_t = self.KLDLoss(F.log_softmax(logits_flat, dim=-1), y_flat)
+
+            autoreg_losses.append(L_state_t + self.lam_KLD * L_kld_t)
+            autoreg_kld_losses.append(L_kld_t)
+
+            # --- DET CRUCIALE SKRIDT ---
+            # Vi tilføjer modellens EGET gæt til historikken, inden næste itteration
+            Z_history = torch.cat([Z_history, new_Z_pred], dim=1)
+
+        # Beregn det gennemsnitlige tab over hele den 15-skridts lange drømme-trajektorie
+        # Vi tilføjer også det globale SIGReg tab for hele sekvensen
         L_sigreg = self.SIGRegLoss(Z.permute(1, 0, 2))
+        
+        val_loss_autoreg = torch.stack(autoreg_losses).mean() + self.lam_SIGReg * L_sigreg
+        val_kld_autoreg = torch.stack(autoreg_kld_losses).mean()
 
-        L = L_state + self.lam_KLD * L_kld + self.lam_SIGReg * L_sigreg
-
-        self.log('val_state_loss', L_state, on_step=False, on_epoch=True)
-        self.log('val_kld_loss', L_kld, on_step=False, on_epoch=True)
+        # Log de akkumulerede værdier til WandB
+        # Nu vil din EarlyStopping holde øje med val_loss (som nu afspejler drømme-robusthed)
+        self.log('val_loss', val_loss_autoreg, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val_kld_loss', val_kld_autoreg, on_step=False, on_epoch=True)
         self.log('val_sigreg_loss', L_sigreg, on_step=False, on_epoch=True)
-        self.log('val_loss', L, on_step=False, on_epoch=True, prog_bar=True)
+
 
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=self.lr)
@@ -198,7 +226,7 @@ if __name__ == '__main__':
         max_epochs = cfg['jepa']['training']['epochs'],
         accelerator = "auto", 
         devices = "auto",
-        accumulate_grad_batches = 4,
+        #accumulate_grad_batches = 4,
         gradient_clip_val = 1.0,
         logger = wandb_logger,
         callbacks = [checkpoint_callback, early_stop_callback, lr_monitor],

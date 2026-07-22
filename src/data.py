@@ -49,8 +49,8 @@ class CryptoDataset(Dataset):
         t = torch.bucketize(t, self.bin_edges) - 1
         t = torch.clamp(t, 0, cfg['data']['num_bins'] - 1)
 
-        t = gaussian_label_smoothing(t, cfg['data']['num_bins'], cfg['data']['sigma'])
-        self.targets = t.view(B, Seq, -1)
+        #t = gaussian_label_smoothing(t, cfg['data']['num_bins'], cfg['data']['sigma'])
+        self.targets = t.view(B, Seq, -1).long()
 
         logger.info(f"Dataset created! Mode: {mode}. Number of Sequences: {self.samples.size(0):,}")
 

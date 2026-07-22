@@ -14,7 +14,9 @@ class Predictor(nn.Module):
                                     ])
         self.return_head = nn.Sequential(
             nn.Linear(d_model, 2*d_model),
+            nn.LayerNorm(2*d_model),       
             nn.SiLU(),
+            nn.Dropout(dropout),         
             nn.Linear(2*d_model, num_bins)
         )
 
@@ -31,7 +33,7 @@ class Predictor(nn.Module):
         return x, self.return_head(x)
 
     def create_causal_mask(self, seq_len):
-        return torch.tril(torch.ones(seq_len, seq_len))
+        return torch.tril(torch.ones(seq_len, seq_len)).unsqueeze(0).unsqueeze(0)
 
 class Encoder(nn.Module):
     def __init__(self, input_dim, d_model, num_layers, num_heads, max_len, dropout = 0.1):
@@ -172,7 +174,7 @@ class FeedForward(nn.Module):
 
         self.net = nn.Sequential(
             nn.Linear(d_model, dim_ff),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(dim_ff, d_model),
         )
@@ -200,11 +202,15 @@ class TransformerEncoderLayer(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
 
     def forward(self, x, mask=None):
-        attn_out = self.self_attn(x, mask)
-        x = self.norm1(x + self.dropout1(attn_out))
+        # Pre-LN på Attention grenen
+        norm_x = self.norm1(x)
+        attn_out = self.self_attn(norm_x, mask)
+        x = x + self.dropout1(attn_out)
 
-        ff_out = self.ffn(x)
-        x = self.norm2(x + self.dropout2(ff_out))
+        # Pre-LN på FeedForward grenen
+        norm_x2 = self.norm2(x)
+        ff_out = self.ffn(norm_x2)
+        x = x + self.dropout2(ff_out)
 
         return x
 
@@ -236,3 +242,25 @@ class TransformerEncoder(nn.Module):
         for layer in self.layers:
             x = layer(x, mask)
         return x
+
+if __name__ == '__main__':
+    # def __init__(self, d_model, num_layers, num_heads, max_len, num_bins, dropout = 0.1)
+    from omegaconf import OmegaConf
+    cfg = OmegaConf.load('./config.yaml')
+    '''predictor = Predictor(
+        d_model = cfg['jepa']['d_model'],
+        num_layers = cfg['jepa']['predictor']['num_layers'],
+        num_heads = cfg['jepa']['predictor']['num_heads'],
+        max_len = cfg['jepa']['predictor']['max_len'],
+        num_bins = cfg['jepa']['predictor']['num_bins']
+    )
+
+    Z = torch.rand((cfg['jepa']['training']['batch_size'], cfg['jepa']['predictor']['max_len'], cfg['jepa']['d_model']))
+    Z_prime = predictor(Z)'''
+    from data import CryptoDataset
+    from util import set_logger
+    logger = set_logger(cfg)
+    data = CryptoDataset(cfg)
+    t = data[0]['target']
+    print(t.shape)
+    print(t)

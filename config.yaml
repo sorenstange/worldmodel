@@ -19,10 +19,10 @@ data:
   sequence_length: 64
   stride: 32
   window_size: 15
-  num_bins: 256
-  extreme_value: 0.15
-  sigma: 0.8
-  normalization_window: 200
+  num_bins: 40
+  extreme_value: 0.02
+  sigma: 0.2
+  normalization_window: 1440
   training_interval: 
     - '2018-01-01 00:00'
     - '2025-01-01 00:00'
@@ -35,23 +35,23 @@ data:
 
 jepa:
     input_dim: 6 # [Open, High, Low, Close, Volume, Volatility]
-    d_model: 2048
+    d_model: 128
     encoder:
-      num_layers: 6
+      num_layers: 12
       num_heads: 4
       max_len: 16
       dropout: 0.1
     predictor:
-      num_layers: 12
+      num_layers: 24
       num_heads: 4
       max_len: 64
-      num_bins: 256
+      num_bins: 128
       dropout: 0.1
     lam_SIGReg: 0.1
-    lam_KLD: 0.5
+    lam_CE: 0.5
     lr: 0.0003
     training:
       epochs: 100
-      batch_size: 16
+      batch_size: 64
       log_every_n_steps: 10
 
