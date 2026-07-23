@@ -19,8 +19,8 @@ data:
   sequence_length: 64
   stride: 32
   window_size: 15
-  num_bins: 40
-  extreme_value: 0.02
+  num_bins: 61
+  extreme_value: 0.03
   sigma: 0.2
   normalization_window: 1440
   training_interval: 
@@ -45,7 +45,7 @@ jepa:
       num_layers: 32
       num_heads: 8
       max_len: 64
-      num_bins: 40
+      num_bins: 11
       dropout: 0.1
     lam_SIGReg: 0.1
     lam_CE: 1.0
@@ -56,8 +56,8 @@ jepa:
       log_every_n_steps: 10
 
 actorcritic:
-  action_bins: 101
-  num_layers: 24
+  action_bins: 201
+  num_layers: 32
   num_heads: 8
   max_len: 64
   dropout: 0.1
