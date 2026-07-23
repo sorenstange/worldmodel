@@ -45,7 +45,7 @@ jepa:
       num_layers: 32
       num_heads: 8
       max_len: 64
-      num_bins: 11
+      num_bins: 61
       dropout: 0.1
     lam_SIGReg: 0.1
     lam_CE: 1.0
