@@ -15,10 +15,10 @@ from util import gaussian_label_smoothing
 class CryptoDataset(Dataset):
     def __init__(self, cfg, mode='training'):
         logger = logging.getLogger(cfg['experiment_name'])
-        logger.info(f'Initializing CryptoDataset. Mode: {mode}. Window size: {cfg['data']['window_size']}')
+        logger.info(f'Initializing CryptoDataset. Mode: {mode}. Window size: {cfg["data"]["window_size"]}')
 
-        self.samples        = []
-        self.targets        = []
+        self.samples = []
+        self.targets = [] # Dette bruges midlertidigt som vores liste af floats i loopet
 
         data, targets = load_data(cfg, mode)
 
@@ -26,31 +26,39 @@ class CryptoDataset(Dataset):
             d = torch.from_numpy(d)
             t = torch.from_numpy(t)
 
+            # Pak inputs i vinduer og sekvenser
             d = d.unfold(0, cfg['data']['window_size'], cfg['data']['window_size']).transpose(1, 2)
             d = d.unfold(0, cfg['data']['sequence_length'], cfg['data']['stride']).permute(0, 3, 1, 2)
             
+            # Beregn det kumulative afkast for hvert vindue
             t = (t + 1.).unfold(0, cfg['data']['window_size'], cfg['data']['window_size'])
-            t = (t.cumprod(1) - 1.)[:,-1]
+            t = (t.cumprod(1) - 1.)[:, -1]
             t = t.unfold(0, cfg['data']['sequence_length'], cfg['data']['stride'])
 
             self.samples.append(d)
             self.targets.append(t)
         
+        # Saml listerne til store 2D/3D tensorer
         self.samples = torch.concatenate(tuple(self.samples))
-        self.targets = torch.concatenate(tuple(self.targets))
+        raw_returns = torch.concatenate(tuple(self.targets)) # Form: [B, Seq]
 
-        B, Seq = self.targets.shape
-        t = self.targets.view(B*Seq)
+        B, Seq = raw_returns.shape
+
+        # Sørg for at gemme de rå float-afkast i det helt rigtige 3D-format [B, Seq, 1] til din AdaLN
+        self.returns = raw_returns.view(B, Seq, 1).float()
+
+        # Flad ud midlertidigt for at køre spand-sortering (bucketize)
+        t_flat = raw_returns.view(B * Seq)
 
         self.min_val, self.max_val = -cfg['data']['extreme_value'], cfg['data']['extreme_value']
-        t = t.clamp(self.min_val, self.max_val)
+        t_flat = t_flat.clamp(self.min_val, self.max_val)
 
         self.bin_edges = torch.linspace(self.min_val, self.max_val + 1e-5, cfg['data']['num_bins'] + 1)
-        t = torch.bucketize(t, self.bin_edges) - 1
-        t = torch.clamp(t, 0, cfg['data']['num_bins'] - 1)
+        t_flat = torch.bucketize(t_flat, self.bin_edges) - 1
+        t_flat = torch.clamp(t_flat, 0, cfg['data']['num_bins'] - 1)
 
-        #t = gaussian_label_smoothing(t, cfg['data']['num_bins'], cfg['data']['sigma'])
-        self.targets = t.view(B, Seq, -1).long()
+        # Genskab den rigtige 3D form [B, Seq, 1] for dine targets til CrossEntropyLoss
+        self.targets = t_flat.view(B, Seq, 1).long()
 
         logger.info(f"Dataset created! Mode: {mode}. Number of Sequences: {self.samples.size(0):,}")
 
@@ -58,7 +66,13 @@ class CryptoDataset(Dataset):
         return self.samples.size(0)
 
     def __getitem__(self, idx):
-        return {'sample' : self.samples[idx, :], 'target' : self.targets[idx, :]}
+        # Alle tre elementer returneres nu med matchende sekvens-dimensioner [Seq, D]
+        return {
+            'sample': self.samples[idx, :], 
+            'target': self.targets[idx, :], 
+            'return': self.returns[idx, :]
+        }
+
 
 def load_data(cfg, mode = 'training'):
     cfg     = cfg['data']

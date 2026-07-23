@@ -35,8 +35,10 @@ class JEPA(L.LightningModule):
 
         self.lam_SIGReg = cfg['jepa']['lam_SIGReg']
         self.lam_CE = cfg['jepa']['lam_CE']
-
         self.lr = cfg['jepa']['lr']
+        
+        # FIX 2: Registreret som buffer, så den automatisk følger med over på GPU (cuda)
+        self.register_buffer("bin_edges", torch.linspace(-cfg['data']['extreme_value'], cfg['data']['extreme_value'] + 1e-5, cfg['data']['num_bins'] + 1))
 
     def encode(self, X):
         if X.dim() == 4:
@@ -50,30 +52,35 @@ class JEPA(L.LightningModule):
         Z = Z.view(B, Seq, -1)
         return Z
 
-    def predict(self, Z):
-        Zp1, Ret = self.predictor(Z)
-        return Zp1, Ret
+    def predict(self, Z, Ret):
+        Zp1, logits = self.predictor(Z, Ret)
+        return Zp1, logits
 
-    def forward(self, X):
+    def forward(self, X, Ret):
         Z = self.encode(X)
-        return self.predict(Z)
+        return self.predict(Z, Ret)
 
     def training_step(self, batch, batch_idx):
-        X, y = batch['sample'], batch['target']
+        X, y, Ret = batch['sample'], batch['target'], batch['return']
         Z = self.encode(X)
 
         Z_in = Z[:, :-1]
+        
+        # Sørg for at Ret_in altid er en 3D tensor [B, Seq-1, 1] for AdaLN konsistens
+        Ret_in = Ret[:, :-1]
+        if Ret_in.dim() == 2:
+            Ret_in = Ret_in.unsqueeze(-1)
+            
         Z_target = Z[:, 1:]
 
-        Z_hat, logits = self.predict(Z_in)  # logits shape: [B, Seq-1, bins]
+        Z_hat, logits = self.predict(Z_in, Ret_in)
 
-        y_target = y[:, 1:]  # Form: [B, Seq-1, 1]
-
+        y_target = y[:, 1:] 
         logits_flat = logits.reshape(-1, logits.size(-1))
-        y_target_flat = y_target.reshape(-1, y_target.size(-1)).squeeze(-1)
+        y_target_flat = y_target.reshape(-1).long() # Sikrer heltal (long) til CrossEntropy
 
         L_state = self.MSELoss(Z_hat, Z_target)
-        L_ce = self.CrossEntropyLoss(logits_flat, y_target_flat) # Bruger nu de fladtrykte versioner
+        L_ce = self.CrossEntropyLoss(logits_flat, y_target_flat) 
         L_sigreg = self.SIGRegLoss(Z.permute(1, 0, 2))
 
         L = L_state + self.lam_CE * L_ce + self.lam_SIGReg * L_sigreg
@@ -85,46 +92,54 @@ class JEPA(L.LightningModule):
 
         return L
 
-    
     def validation_step(self, batch, batch_idx):
-        X, y = batch['sample'], batch['target']
-        Z = self.encode(X)  # Form: [B, Seq, d_model]
+        X, y, Ret = batch['sample'], batch['target'], batch['return']
+        B = X.size(0)
+        Z = self.encode(X)  
 
-        horizon = 15  # Hvor mange skridt vi vil drømme frem i tiden
-        
-        # Vi klipper historikken, så vi har 'horizon' antal sande skridt til slut at sammenligne med
+        horizon = 15  
         start_idx = Z.size(1) - horizon - 1
-        Z_history = Z[:, :start_idx+1, :]  # Vores udgangspunkt (prompt)
+        
+        Z_history = Z[:, :start_idx+1, :]  
+        Ret_history = Ret[:, :start_idx+1]
+        if Ret_history.dim() == 2:
+            Ret_history = Ret_history.unsqueeze(-1) # Form: [B, T_historisk, 1]
 
         autoreg_losses = []
         autoreg_ce_losses = []
 
-        # Autoregressiv løkke inde i valideringen
+        # Find midtpunkterne af dine bins til at afgøre det forventede afkast (returns)
+        bin_centers = (self.bin_edges[:-1] + self.bin_edges[1:]) / 2.0
+
         for t in range(horizon):
-            # Forudsig det næste skridt baseret på den historik, modellen SELV har opbygget
-            Z_next_pred, logits = self.predict(Z_history)
+            Z_next_pred, logits = self.predict(Z_history, Ret_history)
 
-            # Hent de absolut nyeste forudsigelser for dette tidsskridt
             new_Z_pred = Z_next_pred[:, -1:, :]
-            new_logits = logits[:, -1:, :]
+            new_logits = logits[:, -1:, :] # Form: [B, 1, num_bins]
 
-            # Find de tilsvarende SANDE værdier på markedet for dette specifikke tidsskridt
+            # FIX 1 & 3: Find argmax pr. batch-eksempel separat
+            best_bins = torch.argmax(new_logits, dim=-1) # Form: [B, 1]
+            
+            # Smaple de faktiske numeriske returns ud fra dine bin_centers
+            # Formen bliver [B, 1, 1] så den passer direkte til din AdaLN
+            new_Ret = bin_centers[best_bins].unsqueeze(-1) 
+
             target_t = start_idx + 1 + t
             Z_target_t = Z[:, target_t:target_t+1, :]
             y_target_t = y[:, target_t:target_t+1]
 
-            # Flad dimensionerne ud til vores tab-funktioner
             logits_flat = new_logits.reshape(-1, new_logits.size(-1))
-            y_flat = y_target_t.reshape(-1, y_target_t.size(-1)).squeeze(-1)
+            y_flat = y_target_t.reshape(-1).long()
 
-            # Beregn tab for dette specifikke skridt i drømmen
             L_state_t = self.MSELoss(new_Z_pred, Z_target_t)
             L_ce_t = self.CrossEntropyLoss(logits_flat, y_flat)
 
             autoreg_losses.append(L_state_t + self.lam_CE * L_ce_t)
             autoreg_ce_losses.append(L_ce_t)
 
+            # Tilføj modellens egne autoregressive forudsigelser til historikken
             Z_history = torch.cat([Z_history, new_Z_pred], dim=1)
+            Ret_history = torch.cat([Ret_history, new_Ret], dim=1)
 
         L_sigreg = self.SIGRegLoss(Z.permute(1, 0, 2))
         L_state_loss = torch.stack(autoreg_losses).mean()
@@ -136,12 +151,9 @@ class JEPA(L.LightningModule):
         self.log('val_ce_loss', val_ce_autoreg, on_step=False, on_epoch=True)
         self.log('val_sigreg_loss', L_sigreg, on_step=False, on_epoch=True)
 
-
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=self.lr)
-        
         total_steps = self.trainer.estimated_stepping_batches
-        
         num_warmup_steps = int(total_steps * 0.1) 
         
         scheduler = get_cosine_schedule_with_warmup(

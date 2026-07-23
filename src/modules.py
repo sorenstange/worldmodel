@@ -6,9 +6,8 @@ class Predictor(nn.Module):
         super().__init__()
         self.pe = PositionalEncoding(d_model, max_len)
         self.layers = nn.ModuleList([
-            TransformerEncoderLayer(d_model = d_model, 
+            TransformerPredictorLayer(d_model = d_model, 
                                     num_heads = num_heads,
-                                    dim_ff = d_model * 2, 
                                     dropout = dropout) 
                                     for _ in range(num_layers)
                                     ])
@@ -20,7 +19,7 @@ class Predictor(nn.Module):
             nn.Linear(2*d_model, num_bins)
         )
 
-    def forward(self, x):
+    def forward(self, x, ret):
         if x.dim() == 2:
             x = x.unsqueeze(0)
         _, seq_len, _ = x.shape
@@ -28,7 +27,7 @@ class Predictor(nn.Module):
 
         x = self.pe(x)
         for layer in self.layers:
-            x = layer(x, mask)
+            x = layer(x, ret, mask)
 
         return x, self.return_head(x)
 
@@ -46,7 +45,6 @@ class Encoder(nn.Module):
         self.layers = nn.ModuleList([
             TransformerEncoderLayer(d_model = d_model, 
                                     num_heads = num_heads,
-                                    dim_ff = d_model * 2, 
                                     dropout = dropout) 
                                     for _ in range(num_layers)
                                     ])
@@ -200,9 +198,8 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-
-class TransformerEncoderLayer(nn.Module):
-    def __init__(self, d_model, num_heads, dim_ff, dropout=0.1):
+class TransformerPredictorLayer(nn.Module):
+    def __init__(self, d_model, num_heads, dropout=0.1):
         super().__init__()
 
         self.self_attn = MultiHeadSelfAttention(
@@ -211,7 +208,38 @@ class TransformerEncoderLayer(nn.Module):
             dropout,
         )
 
-        self.ffn = FeedForward(d_model, dim_ff, dropout)
+        self.ffn = FeedForward(d_model, 2*d_model, dropout)
+
+        self.norm1 = AdaLN(d_model)
+        self.norm2 = AdaLN(d_model)
+
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+    def forward(self, x, ret, mask=None):
+        # Pre-LN på Attention grenen
+        norm_x = self.norm1(x, ret)
+        attn_out = self.self_attn(norm_x, mask)
+        x = x + self.dropout1(attn_out)
+
+        # Pre-LN på FeedForward grenen
+        norm_x2 = self.norm2(x, ret)
+        ff_out = self.ffn(norm_x2)
+        x = x + self.dropout2(ff_out)
+
+        return x
+
+class TransformerEncoderLayer(nn.Module):
+    def __init__(self, d_model, num_heads, dropout=0.1):
+        super().__init__()
+
+        self.self_attn = MultiHeadSelfAttention(
+            d_model,
+            num_heads,
+            dropout,
+        )
+
+        self.ffn = FeedForward(d_model, 2*d_model, dropout)
 
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
@@ -230,35 +258,6 @@ class TransformerEncoderLayer(nn.Module):
         ff_out = self.ffn(norm_x2)
         x = x + self.dropout2(ff_out)
 
-        return x
-
-
-class TransformerEncoder(nn.Module):
-    def __init__(
-        self,
-        num_layers,
-        d_model,
-        num_heads,
-        dim_ff,
-        dropout=0.1,
-    ):
-        super().__init__()
-
-        self.layers = nn.ModuleList(
-            [
-                TransformerEncoderLayer(
-                    d_model,
-                    num_heads,
-                    dim_ff,
-                    dropout,
-                )
-                for _ in range(num_layers)
-            ]
-        )
-
-    def forward(self, x, mask=None):
-        for layer in self.layers:
-            x = layer(x, mask)
         return x
 
 if __name__ == '__main__':
