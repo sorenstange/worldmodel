@@ -37,21 +37,21 @@ jepa:
     input_dim: 6 # [Open, High, Low, Close, Volume, Volatility]
     d_model: 128
     encoder:
-      num_layers: 12
+      num_layers: 16
       num_heads: 4
       max_len: 16
       dropout: 0.1
     predictor:
-      num_layers: 24
-      num_heads: 4
+      num_layers: 32
+      num_heads: 8
       max_len: 64
-      num_bins: 128
+      num_bins: 40
       dropout: 0.1
     lam_SIGReg: 0.1
-    lam_CE: 0.5
+    lam_CE: 1.0
     lr: 0.0003
     training:
-      epochs: 100
-      batch_size: 64
+      epochs: 1000
+      batch_size: 128
       log_every_n_steps: 10
 

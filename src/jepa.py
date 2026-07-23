@@ -97,7 +97,7 @@ class JEPA(L.LightningModule):
         Z_history = Z[:, :start_idx+1, :]  # Vores udgangspunkt (prompt)
 
         autoreg_losses = []
-        autoreg_kld_losses = []
+        autoreg_ce_losses = []
 
         # Autoregressiv løkke inde i valideringen
         for t in range(horizon):
@@ -111,34 +111,29 @@ class JEPA(L.LightningModule):
             # Find de tilsvarende SANDE værdier på markedet for dette specifikke tidsskridt
             target_t = start_idx + 1 + t
             Z_target_t = Z[:, target_t:target_t+1, :]
-            y_target_t = y[:, target_t:target_t+1, :]
+            y_target_t = y[:, target_t:target_t+1]
 
             # Flad dimensionerne ud til vores tab-funktioner
             logits_flat = new_logits.reshape(-1, new_logits.size(-1))
-            y_flat = y_target_t.reshape(-1, y_target_t.size(-1))
+            y_flat = y_target_t.reshape(-1, y_target_t.size(-1)).squeeze(-1)
 
             # Beregn tab for dette specifikke skridt i drømmen
             L_state_t = self.MSELoss(new_Z_pred, Z_target_t)
-            L_kld_t = self.KLDLoss(F.log_softmax(logits_flat, dim=-1), y_flat)
+            L_ce_t = self.CrossEntropyLoss(logits_flat, y_flat)
 
-            autoreg_losses.append(L_state_t + self.lam_KLD * L_kld_t)
-            autoreg_kld_losses.append(L_kld_t)
+            autoreg_losses.append(L_state_t + self.lam_CE * L_ce_t)
+            autoreg_ce_losses.append(L_ce_t)
 
-            # --- DET CRUCIALE SKRIDT ---
-            # Vi tilføjer modellens EGET gæt til historikken, inden næste itteration
             Z_history = torch.cat([Z_history, new_Z_pred], dim=1)
 
-        # Beregn det gennemsnitlige tab over hele den 15-skridts lange drømme-trajektorie
-        # Vi tilføjer også det globale SIGReg tab for hele sekvensen
         L_sigreg = self.SIGRegLoss(Z.permute(1, 0, 2))
-        
-        val_loss_autoreg = torch.stack(autoreg_losses).mean() + self.lam_SIGReg * L_sigreg
-        val_kld_autoreg = torch.stack(autoreg_kld_losses).mean()
+        L_state_loss = torch.stack(autoreg_losses).mean()
+        val_loss_autoreg = L_state_loss + self.lam_SIGReg * L_sigreg
+        val_ce_autoreg = torch.stack(autoreg_ce_losses).mean()
 
-        # Log de akkumulerede værdier til WandB
-        # Nu vil din EarlyStopping holde øje med val_loss (som nu afspejler drømme-robusthed)
         self.log('val_loss', val_loss_autoreg, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_kld_loss', val_kld_autoreg, on_step=False, on_epoch=True)
+        self.log('val_state_loss', L_state_loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val_ce_loss', val_ce_autoreg, on_step=False, on_epoch=True)
         self.log('val_sigreg_loss', L_sigreg, on_step=False, on_epoch=True)
 
 
@@ -214,7 +209,7 @@ if __name__ == '__main__':
 
     early_stop_callback = EarlyStopping(
         monitor="val_loss",
-        patience=5,
+        patience=10,
         mode="min",
         check_on_train_epoch_end=False, # Vent altid til valideringen er HELT færdig
         verbose=True
@@ -229,7 +224,8 @@ if __name__ == '__main__':
         #accumulate_grad_batches = 4,
         gradient_clip_val = 1.0,
         logger = wandb_logger,
-        callbacks = [checkpoint_callback, early_stop_callback, lr_monitor],
+        #callbacks = [checkpoint_callback, early_stop_callback, lr_monitor],
+        callbacks = [checkpoint_callback, lr_monitor],
         log_every_n_steps = cfg['jepa']['training']['log_every_n_steps']
     )
 

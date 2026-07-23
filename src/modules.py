@@ -93,6 +93,24 @@ class PositionalEncoding(nn.Module):
         pos = self.embedding(positions)
         return x + pos.unsqueeze(0)
 
+class AdaLN(nn.Module):
+    def __init__(self, hidden_dim, action_dim=1):
+        super().__init__()
+        self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.action_to_scale_shift = nn.Linear(action_dim, hidden_dim * 2)
+        
+        nn.init.zeros_(self.action_to_scale_shift.weight)
+        nn.init.zeros_(self.action_to_scale_shift.bias)
+
+    def forward(self, x, action):
+        normed_x = self.norm(x)
+        if action.dim() == 2:
+            scale_shift = self.action_to_scale_shift(action).unsqueeze(1) # [B, 1, H*2]
+        else:
+            scale_shift = self.action_to_scale_shift(action) # [B, T, H*2]
+            
+        gamma, beta = scale_shift.chunk(2, dim=-1)
+        return normed_x * (1.0 + gamma) + beta
 
 class SIGReg(torch.nn.Module):
     def __init__(self, knots=17, num_proj=1024):
