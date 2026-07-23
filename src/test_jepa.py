@@ -78,7 +78,7 @@ def run_trajectory(checkpoint_path, cfg, horizon=15, temperature=0.5):
     return Z_true_segments[0], predicted_trajectory[0], y_true_segments[0], predicted_logits, test_dataset, bin_centers.cpu().numpy()
 
 if __name__ == '__main__':
-    CHECKPOINT = "./models/swift-bush-43/last.ckpt" 
+    CHECKPOINT = "./models/wild-bird-44/last.ckpt" 
     CONFIG = "./config.yaml"
     horizon = 15
     
