@@ -260,7 +260,7 @@ if __name__ == '__main__':
     from util import set_logger
     from jepa import JEPA
 
-    jepa_path = './models/jepa/wild-bird-44/last.ckpt'
+    jepa_path = './models/jepa/charmed-violet-1/last.ckpt'
 
     load_dotenv()
     wandb.login()
