@@ -1,6 +1,45 @@
 import torch
 import torch.nn as nn
 
+class Backbone(nn.Module):
+    def __init__(self, d_model, num_layers, num_heads, max_len, condition_dim=4, dropout=0.1):
+        """
+        Den samlede kausale Transformer-backbone for dit Actor-Critic netværk.
+        """
+        super().__init__()
+        self.pe = PositionalEncoding(d_model, max_len)
+        self.layers = nn.ModuleList([
+            TransformerRLBackboneLayer(
+                d_model=d_model,
+                num_heads=num_heads,
+                condition_dim=condition_dim,
+                dropout=dropout
+            ) for _ in range(num_layers)
+        ])
+
+    def forward(self, z, condition):
+        """
+        z: [B, T, d_model]
+        condition: [B, T, condition_dim] eller [B, condition_dim]
+        """
+        if z.dim() == 2:
+            z = z.unsqueeze(0)
+            
+        B, seq_len, _ = z.shape
+        
+        # Opret en fejlfri kausal maske til dit custom attention-modul
+        mask = torch.tril(torch.ones(seq_len, seq_len, device=z.device)) == 1
+        mask = mask.unsqueeze(0).unsqueeze(0) # [1, 1, seq_len, seq_len] til broadcasting
+
+        # Tilføj positionel kodning
+        x = self.pe(z)
+        
+        # Kør sekvensen igennem de betingede lag
+        for layer in self.layers:
+            x = layer(x, condition, mask)
+            
+        return x
+
 class Predictor(nn.Module):
     def __init__(self, d_model, num_layers, num_heads, max_len, num_bins, dropout = 0.1):
         super().__init__()
@@ -92,20 +131,24 @@ class PositionalEncoding(nn.Module):
         return x + pos.unsqueeze(0)
 
 class AdaLN(nn.Module):
-    def __init__(self, hidden_dim, action_dim=1):
+    def __init__(self, hidden_dim, condition_dim=1): # F.eks. 1 for return + 3 for action-logits
         super().__init__()
         self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
-        self.action_to_scale_shift = nn.Linear(action_dim, hidden_dim * 2)
+        self.cond_to_scale_shift = nn.Linear(condition_dim, hidden_dim * 2)
         
-        nn.init.zeros_(self.action_to_scale_shift.weight)
-        nn.init.zeros_(self.action_to_scale_shift.bias)
+        nn.init.zeros_(self.cond_to_scale_shift.weight)
+        nn.init.zeros_(self.cond_to_scale_shift.bias)
 
-    def forward(self, x, action):
+    def forward(self, x, condition):
+        """
+        condition: [B, T, condition_dim] eller [B, condition_dim]
+        """
         normed_x = self.norm(x)
-        if action.dim() == 2:
-            scale_shift = self.action_to_scale_shift(action).unsqueeze(1) # [B, 1, H*2]
+        
+        if condition.dim() == 2:
+            scale_shift = self.cond_to_scale_shift(condition).unsqueeze(1) # [B, 1, H*2]
         else:
-            scale_shift = self.action_to_scale_shift(action) # [B, T, H*2]
+            scale_shift = self.cond_to_scale_shift(condition) # [B, T, H*2]
             
         gamma, beta = scale_shift.chunk(2, dim=-1)
         return normed_x * (1.0 + gamma) + beta
@@ -197,6 +240,45 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+class TransformerBackboneLayer(nn.Module):
+    def __init__(self, d_model, num_heads, condition_dim=4, dropout=0.1):
+        """
+        Delt Transformer-lag til Actor-Critic backbone.
+        Betinges af både markedets afkast og agentens handlinger via AdaLN.
+        """
+        super().__init__()
+        self.self_attn = MultiHeadSelfAttention(
+            d_model=d_model,
+            num_heads=num_heads,
+            dropout=dropout
+        )
+        # FFN dimension sat til 2*d_model som i dine andre moduler
+        self.ffn = FeedForward(d_model, 2 * d_model, dropout)
+
+        # AdaLN modtager den samlede dimension (afkast + handlinger)
+        self.norm1 = AdaLN(d_model, condition_dim)
+        self.norm2 = AdaLN(d_model, condition_dim)
+
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+    def forward(self, x, condition, mask=None):
+        """
+        x: [B, T, d_model] (Latente tilstande)
+        condition: [B, T, condition_dim] (Splejset return + action)
+        """
+        # Pre-LN Attention gren betinget på marked + handling
+        norm_x = self.norm1(x, condition)
+        attn_out = self.self_attn(norm_x, mask)
+        x = x + self.dropout1(attn_out)
+
+        # Pre-LN FeedForward gren betinget på marked + handling
+        norm_x2 = self.norm2(x, condition)
+        ff_out = self.ffn(norm_x2)
+        x = x + self.dropout2(ff_out)
+
+        return x
 
 class TransformerPredictorLayer(nn.Module):
     def __init__(self, d_model, num_heads, dropout=0.1):
