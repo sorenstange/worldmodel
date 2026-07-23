@@ -55,3 +55,22 @@ jepa:
       batch_size: 128
       log_every_n_steps: 10
 
+actorcritic:
+  action_bins: 100
+  num_layers: 24
+  num_heads: 8
+  max_len: 64
+  actorcritic: 0.1
+  lr: 0.0003
+  gamma: 0.99 # Diskounteringsfaktor
+  gae_lambda: 0.95 # Generalized Advantage Estimation
+  ppo_clip: 0.2 # PPO clipping interval (epsilon)
+  ent_coef: 0.01 # Entropi-vægt (sikrer udforskning)
+  vf_coef: 0.5 # Critic loss vægt
+  ppo_epochs: 4 # Hvor mange gange vi genbruger drømme-data
+  dream_horizon: 15 # Hvor langt frem vi drømmer
+  training:
+    epochs: 1000
+    batch_size: 128
+    log_every_n_steps: 10
+

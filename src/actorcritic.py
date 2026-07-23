@@ -1,15 +1,12 @@
 import torch
 import torch.nn as nn
-import lightning as L
-
-from modules import *
-import torch
-import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import lightning as L
 
-from modules import RLBackbone
+from transformers import get_cosine_schedule_with_warmup
+
+from modules import *
 
 class ActorCritic(L.LightningModule):
     def __init__(self, jepa_model, cfg):
@@ -21,45 +18,44 @@ class ActorCritic(L.LightningModule):
         self.jepa.freeze()
         
         d_model = cfg['jepa']['d_model']
-        self.action_bins = cfg['rl']['action_bins']
+        self.action_bins = cfg['actorcritic']['action_bins']
         
-        # 2. Den dedikerede RL-Backbone (Condition: 1 return + action_bins one-hot)
-        self.backbone = RLBackbone(
+        self.backbone = Backbone(
             d_model=d_model,
-            num_layers=cfg['rl']['num_layers'],
-            num_heads=cfg['rl']['num_heads'],
-            max_len=cfg['jepa']['predictor']['max_len'],
+            num_layers=cfg['actorcritic']['num_layers'],
+            num_heads=cfg['actorcritic']['num_heads'],
+            max_len=cfg['actorcritic']['max_len'],
             condition_dim=1 + self.action_bins,
-            dropout=cfg['rl']['dropout']
+            dropout=cfg['actorcritic']['dropout']
         )
         
         # 3. Policy (Actor) og Value (Critic) hoveder
         self.actor_head = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.LayerNorm(d_model),
+            nn.Linear(d_model, 2*d_model),
+            nn.LayerNorm(2*d_model),
             nn.SiLU(),
-            nn.Linear(d_model, self.action_bins)
+            nn.Linear(2*d_model, self.action_bins)
         )
         
         self.critic_head = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.LayerNorm(d_model),
+            nn.Linear(d_model, 2*d_model),
+            nn.LayerNorm(2*d_model),
             nn.SiLU(),
-            nn.Linear(d_model, 1)
+            nn.Linear(2*d_model, 1)
         )
         
         # Registerer de reelle trading-positioner [-1.0 til 1.0]
         self.register_buffer("positions", torch.linspace(-1.0, 1.0, self.action_bins))
         
         # PPO Hyperparametre
-        self.lr = cfg['rl']['lr']
-        self.gamma = cfg['rl'].get('gamma', 0.99)       # Diskounteringsfaktor
-        self.gae_lambda = cfg['rl'].get('gae_lambda', 0.95) # Generalized Advantage Estimation
-        self.ppo_clip = cfg['rl'].get('ppo_clip', 0.2)     # PPO clipping interval (epsilon)
-        self.ent_coef = cfg['rl'].get('ent_coef', 0.01)   # Entropi-vægt (sikrer udforskning)
-        self.vf_coef = cfg['rl'].get('vf_coef', 0.5)       # Critic loss vægt
-        self.ppo_epochs = cfg['rl'].get('ppo_epochs', 4)   # Hvor mange gange vi genbruger drømme-data
-        self.dream_horizon = cfg['rl'].get('dream_horizon', 15) # Hvor langt frem vi drømmer
+        self.lr = cfg['actorcritic']['lr']
+        self.gamma = cfg['actorcritic']['gamma']       
+        self.gae_lambda = cfg['actorcritic']['gae_lambda'] 
+        self.ppo_clip = cfg['actorcritic']['ppo_clip']    
+        self.ent_coef = cfg['actorcritic']['ent_coef']   
+        self.vf_coef = cfg['actorcritic']['vf_coef']       
+        self.ppo_epochs = cfg['actorcritic']['ppo_epochs']   
+        self.dream_horizon = cfg['actorcritic']['dream_horizon'] 
         
         # SLA MANUEL OPTIMERING TIL (Nødvendigt til PPO rollouts)
         self.automatic_optimization = False
@@ -226,5 +222,22 @@ class ActorCritic(L.LightningModule):
         self.log('ppo/mean_reward', dream_rewards.mean(), prog_bar=True)
         self.log('ppo/mean_value', dream_values.mean())
         
-    def configure_optimizers(self):# Da det er en unified arkitektur, opdaterer denne optimizer hele systemet samtidigt
-        return optim.AdamW(self.parameters(), lr=self.lr)
+    def configure_optimizers(self):
+        optimizer = optim.AdamW(self.parameters(), lr=self.lr)
+        total_steps = self.trainer.estimated_stepping_batches
+        num_warmup_steps = int(total_steps * 0.1) 
+        
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer=optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=total_steps
+        )
+    
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1
+            }
+        }
