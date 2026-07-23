@@ -27,8 +27,8 @@
 ### -- Specify the output and error file. %J is the job-id --
 ### -- -o and -e mean append, -oo and -eo mean overwrite --
 
-#BSUB -o /zhome/d3/0/155487/worldmodel/outputs/download_%J.out
-#BSUB -e /zhome/d3/0/155487/worldmodel/outputs/download_%J.err
+#BSUB -o /zhome/d3/0/155487/worldmodel/outputs/download/%J.out
+#BSUB -e /zhome/d3/0/155487/worldmodel/outputs/download/%J.err
 
 # -- end of LSF options --
 
