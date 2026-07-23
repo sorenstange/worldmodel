@@ -206,7 +206,7 @@ if __name__ == '__main__':
 
     wandb_logger = WandbLogger(
         entity='rudyhuy',
-        project='worldmodel' 
+        project='jepa' 
     )
 
     checkpoint_callback = ModelCheckpoint(
