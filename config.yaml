@@ -60,7 +60,7 @@ actorcritic:
   num_layers: 24
   num_heads: 8
   max_len: 64
-  actorcritic: 0.1
+  dropout: 0.1
   start_temperature: 1.4
   min_temperature: 0.4
   lr: 0.0003

@@ -210,7 +210,7 @@ if __name__ == '__main__':
     )
 
     checkpoint_callback = ModelCheckpoint(
-        dirpath=f"./models/{wandb_logger.experiment.name}/", # Gemmer i ./models/{run_name}/
+        dirpath=f"./models/jepa/{wandb_logger.experiment.name}/", 
         filename="jepa",
         monitor="val_loss",
         mode="min",
