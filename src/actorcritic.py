@@ -56,8 +56,9 @@ class ActorCritic(L.LightningModule):
         self.vf_coef = cfg['actorcritic']['vf_coef']       
         self.ppo_epochs = cfg['actorcritic']['ppo_epochs']   
         self.dream_horizon = cfg['actorcritic']['dream_horizon'] 
-        
-        # SLA MANUEL OPTIMERING TIL (Nødvendigt til PPO rollouts)
+        self.start_temp = cfg['actorcrtic']['start_temperature']
+        self.min_temp = cfg['actorcrtic']['min_temperature']
+
         self.automatic_optimization = False
 
     def forward(self, Z, last_returns, last_action_bins):
@@ -78,13 +79,16 @@ class ActorCritic(L.LightningModule):
         return action_logits, value
 
     def training_step(self, batch, batch_idx):
+        max_epochs = self.trainer.max_epochs
+        cur_epoch = self.current_epoch
+        temp_progress = nuvaerende_epoke / max_epochs
+        self.temperature = self.start_temp - temp_progress * (self.start_temp - self.min_temp)
         # Hent din fælles optimizer
         opt = self.optimizers()
         
         X, y, Ret = batch['sample'], batch['target'], batch['return']
         B, Seq, _ = Ret.shape
         
-        # --- SKRIDT 1: GENERER PROMPT FRA REEL DATA ---
         with torch.no_grad():
             Z_start = self.jepa.encode(X) # [B, Seq, d_model]
             
@@ -92,7 +96,8 @@ class ActorCritic(L.LightningModule):
         start_t = Seq - self.dream_horizon - 1
         Z_history = Z_start[:, :start_t+1, :]
         Ret_history = Ret[:, :start_t+1, :]
-        Action_history = y[:, :start_t+1, :].squeeze(-1) # [B, T_hist]
+        cash_bin_idx = self.action_bins // 2
+        Action_history = torch.full((B, start_t + 1), cash_bin_idx, dtype=torch.long, device=X.device)
 
         # Databeholdere til vores PPO Rollout (Drømme-buffer)
         dream_states = []
@@ -113,15 +118,15 @@ class ActorCritic(L.LightningModule):
             action = dist.sample() # [B]
             log_prob = dist.log_prob(action) # [B]
 
-            # Få JEPA verdensmodellen til at drømme om det næste latente skridt og pris-logits
             with torch.no_grad():
                 # Vi bruger de seneste afkast i historikken som input til verdensmodellens predictor
                 Z_next_pred, logits_pred = self.jepa.predict(Z_history, Ret_history)
                 new_Z = Z_next_pred[:, -1:, :]
                 
-                # Omsæt verdensmodellens pris-forudsigelse til et numerisk krypto-afkast (float)
-                pred_bin = torch.argmax(logits_pred[:, -1:, :], dim=-1)
-                new_market_return = self.jepa.bin_edges[pred_bin].unsqueeze(-1) # [B, 1, 1]
+                nyeste_market_logits = logits_pred[:, -1, :] 
+                scaled_market_logits = nyeste_market_logits / self.temperature
+                sampled_market_bin = torch.multinomial(market_probs, num_samples=1)
+                new_market_return = self.jepa.bin_edges[sampled_market_bin].unsqueeze(-1)
 
             # BEREGN TRADING REWARD (P&L)
             # Agentens valgte krypto-position (-1.0 til 1.0)
@@ -221,6 +226,7 @@ class ActorCritic(L.LightningModule):
         self.log('ppo/entropy', entropy)
         self.log('ppo/mean_reward', dream_rewards.mean(), prog_bar=True)
         self.log('ppo/mean_value', dream_values.mean())
+        self.log('ppo/dream_temperature', self.temperature)
         
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=self.lr)
@@ -241,3 +247,83 @@ class ActorCritic(L.LightningModule):
                 "frequency": 1
             }
         }
+
+if __name__ == '__main__':
+    import wandb
+    from omegaconf import OmegaConf
+    from lightning.pytorch.loggers import WandbLogger
+    from torch.utils.data import DataLoader
+    from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
+    from dotenv import load_dotenv
+
+    from data import CryptoDataset
+    from util import set_logger
+    from jepa import JEPA
+
+    jepa_path = './models/wild-bird-44/last.ckpt'
+
+    load_dotenv()
+    wandb.login()
+
+    cfg = OmegaConf.load('./config.yaml')
+    jepa = JEPA.load_from_checkpoint(jepa_path, cfg=cfg, weights_only=False)
+
+    logger = set_logger(cfg)
+    logger.info('Starting ActorCritic training')
+    logger.info(f'Using JEPA from {jepa_path}')
+
+    train_dataset = CryptoDataset(cfg, mode = 'training')
+    val_dataset = CryptoDataset(cfg, mode = 'validation')
+
+    train_loader = DataLoader(train_dataset, 
+                              batch_size = cfg['jepa']['training']['batch_size'],
+                              shuffle = True,
+                              num_workers = 3)
+    val_loader = DataLoader(val_dataset, 
+                              batch_size = cfg['jepa']['training']['batch_size'],
+                              shuffle = False,
+                              num_workers = 3)
+    
+    model = ActorCritic(jepa, cfg)
+
+    wandb_logger = WandbLogger(
+        entity='rudyhuy',
+        project='ActorCritic' 
+    )
+
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=f"./models/actorcritic/{wandb_logger.experiment.name}/", # Gemmer i ./models/{run_name}/
+        filename="jepa",
+        monitor="val_loss",
+        mode="min",
+        save_top_k=1,
+        save_last=True,
+        save_weights_only=True
+    )
+
+    early_stop_callback = EarlyStopping(
+        monitor="val_loss",
+        patience=10,
+        mode="min",
+        check_on_train_epoch_end=False, # Vent altid til valideringen er HELT færdig
+        verbose=True
+    )
+
+    lr_monitor = LearningRateMonitor(logging_interval='step')
+
+    trainer = L.Trainer(
+        max_epochs = cfg['actorcritic']['training']['epochs'],
+        accelerator = "auto", 
+        devices = "auto",
+        #accumulate_grad_batches = 4,
+        gradient_clip_val = 1.0,
+        logger = wandb_logger,
+        #callbacks = [checkpoint_callback, early_stop_callback, lr_monitor],
+        callbacks = [checkpoint_callback, lr_monitor],
+        log_every_n_steps = cfg['actorcritic']['training']['log_every_n_steps']
+    )
+
+    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+
+
+    

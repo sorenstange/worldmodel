@@ -56,11 +56,13 @@ jepa:
       log_every_n_steps: 10
 
 actorcritic:
-  action_bins: 100
+  action_bins: 101
   num_layers: 24
   num_heads: 8
   max_len: 64
   actorcritic: 0.1
+  start_temperature: 1.4
+  min_temperature: 0.4
   lr: 0.0003
   gamma: 0.99 # Diskounteringsfaktor
   gae_lambda: 0.95 # Generalized Advantage Estimation
