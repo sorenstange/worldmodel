@@ -71,6 +71,7 @@ actorcritic:
   vf_coef: 0.5 # Critic loss vægt
   ppo_epochs: 4 # Hvor mange gange vi genbruger drømme-data
   dream_horizon: 15 # Hvor langt frem vi drømmer
+  commission_value: 0.0005
   training:
     epochs: 1000
     batch_size: 128

@@ -78,7 +78,7 @@ def run_trajectory(checkpoint_path, cfg, horizon=15, temperature=0.5):
     return Z_true_segments[0], predicted_trajectory[0], y_true_segments[0], predicted_logits, test_dataset, bin_centers.cpu().numpy()
 
 if __name__ == '__main__':
-    CHECKPOINT = "./models/wild-bird-44/last.ckpt" 
+    CHECKPOINT = "./models/jepa/charmed-violet-1/last.ckpt" 
     CONFIG = "./config.yaml"
     horizon = 15
     
@@ -121,7 +121,7 @@ if __name__ == '__main__':
     pred_cumprod_argmax = np.cumprod(1 + pred_returns_argmax)
     pred_cumprod_sampled = np.cumprod(1 + pred_returns_sampled)
 
-    # ==================== PLOTTING DELEN ====================
+        # ==================== PLOTTING DELEN ====================
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
     t_steps = np.arange(1, horizon + 1)
 
@@ -135,17 +135,33 @@ if __name__ == '__main__':
     ax1.grid(True, linestyle=':', alpha=0.6)
 
     # --- NEDERSTE SUBPLOT: Heatmap over sandsynligheder ---
+    # Hent min og max værdier direkte fra dine bin_centers
+    min_return = bin_centers[0]
+    max_return = bin_centers[-1]
+
+    # FIX 1: Vi ændrer 'extent' i bunden og toppen til de reelle return-værdier (floats)
     im = ax2.imshow(Y_pred_probs.T, aspect='auto', cmap='viridis', origin='lower',
-                    extent=[0.5, horizon + 0.5, 0, len(bin_centers) - 1])
+                    extent=[0.5, horizon + 0.5, min_return, max_return])
     
-    # Vis både sande og udtrukne bin-placeringer oven på distributionen
-    ax2.scatter(t_steps, Y_true, color='red', edgecolor='white', s=45, label='Sand Bin-placering', zorder=5)
-    ax2.scatter(t_steps, sampled_bins, color='cyan', marker='x', s=55, linewidths=2, label='Samplet AdaLN-Feedback Bin', zorder=6)
+    # FIX 2: Da y-aksen nu er numeriske returns, skal vi mappe y-værdierne til bin_centers i stedet for indekser
+    true_returns_vals = bin_centers[Y_true]
+    sampled_returns_vals = bin_centers[sampled_bins]
+
+    # Plot punkterne ved de korrekte float-værdier på y-aksen
+    ax2.scatter(t_steps, true_returns_vals, color='red', edgecolor='white', s=45, label='Sand afkast-placering', zorder=5)
+    ax2.scatter(t_steps, sampled_returns_vals, color='cyan', marker='x', s=55, linewidths=2, label='Samplet AdaLN-Feedback afkast', zorder=6)
 
     ax2.set_title(f'Betingede Sandsynligheder Heatmap (Temp={temperature})', fontsize=14)
     ax2.set_xlabel('Tidsskridt frem i tiden (Minutter)', fontsize=12)
-    ax2.set_ylabel('Pris-Bin Index (0-255)', fontsize=12)
+    ax2.set_ylabel('Afkast pr. minut (Returns)', fontsize=12)
     ax2.set_xticks(t_steps)
+    
+    # FIX 3: Formater y-aksens labels pænt som procenter
+    import matplotlib.ticker as mtick
+    # Viser værdier med procenttegn og 2 decimaler (f.eks. 0.05 bliver til 5.00%)
+    # Da dine returns er rå procenter (f.eks. 0.001 for 0.1%), ganger vi ticks med 100
+    ax2.yaxis.set_major_formatter(mtick.PercentFormatter(1.0, decimals=2)) 
+    
     ax2.legend(fontsize=11, loc='upper left')
 
     cbar = fig.colorbar(im, ax=ax2, orientation='vertical', pad=0.02)

@@ -58,6 +58,7 @@ class ActorCritic(L.LightningModule):
         self.dream_horizon = cfg['actorcritic']['dream_horizon'] 
         self.start_temp = cfg['actorcrtic']['start_temperature']
         self.min_temp = cfg['actorcrtic']['min_temperature']
+        self.com_v = cfg['actorcritic']['commission_value']
 
         self.automatic_optimization = False
 
@@ -65,7 +66,7 @@ class ActorCritic(L.LightningModule):
         """
         Z: [B, Seq, d_model]
         last_returns: [B, Seq, 1]
-        last_action_bins: [B, Seq]
+        last_action_bins: [B, Seq, action_bins]
         """
         last_actions_one_hot = F.one_hot(last_action_bins.long(), num_classes=self.action_bins).float()
         condition = torch.cat([last_returns, last_actions_one_hot], dim=-1)
@@ -77,6 +78,63 @@ class ActorCritic(L.LightningModule):
         value = self.critic_head(last_step_features)
         
         return action_logits, value
+
+    def dream_episodes(self, Z_history, Ret_history, Action_history):
+        old_position = None
+
+        dream_states = []
+        dream_returns = []
+        dream_actions = []
+        dream_action_log_probs = []
+        dream_values = []
+        dream_rewards = []
+
+        for t in range(self.dream_horizon):
+            action_logits, value = self(Z_history, Ret_history, Action_history)
+            
+            probs = F.softmax(action_logits, dim=-1)
+            dist = torch.distributions.Categorical(probs)
+            action = dist.sample() # [B]
+            log_prob = dist.log_prob(action) # [B]
+
+            with torch.no_grad():
+                # Vi bruger de seneste afkast i historikken som input til verdensmodellens predictor
+                Z_next_pred, logits_pred = self.jepa.predict(Z_history, Ret_history)
+                new_Z = Z_next_pred[:, -1:, :]
+                
+                nyeste_market_logits = logits_pred[:, -1, :] 
+                scaled_market_logits = nyeste_market_logits / self.temperature
+                sampled_market_bin = torch.multinomial(market_probs, num_samples=1)
+                new_market_return = self.jepa.bin_edges[sampled_market_bin].unsqueeze(-1)
+
+            reel_position = self.positions[action].unsqueeze(-1).unsqueeze(-1) # [B, 1, 1]
+            commission = (reel_position - old_position) * self.com_v if old_position is not None else reel_position * self.com_v
+            old_position = reel_position
+            # Reward = Markedets afkast * Agentens position (Gevinst ved short hvis markedet falder!)
+            reward = (new_market_return * reel_position - commission).squeeze(-1).squeeze(-1).log1p() # [B]
+
+            # Gem data til PPO-opdateringen
+            dream_states.append(Z_history[:, -1, :]) # Nuværende latente tilstand
+            dream_returns.append(Ret_history[:, -1, :])
+            dream_actions.append(action)
+            dream_action_log_probs.append(log_prob)
+            dream_values.append(value.squeeze(-1))
+            dream_rewards.append(reward)
+
+            # Opdater drømmehistorikken autoregressivt til næste skridt
+            Z_history = torch.cat([Z_history, new_Z], dim=1)
+            Ret_history = torch.cat([Ret_history, new_market_return], dim=1)
+            Action_history = torch.cat([Action_history, action.unsqueeze(-1)], dim=1)
+
+        # Stable arrays fra vores drømme [Dream_Horizon, B] -> [B, Dream_Horizon]
+        dream_states = torch.stack(dream_states, dim=1)
+        dream_returns = torch.stack(dream_returns, dim=1)
+        dream_actions = torch.stack(dream_actions, dim=1)
+        dream_old_log_probs = torch.stack(dream_action_log_probs, dim=1).detach()
+        dream_values = torch.stack(dream_values, dim=1)
+        dream_rewards = torch.stack(dream_rewards, dim=1)
+
+        return dream_states, dream_returns, dream_actions, dream_old_log_probs, dream_values, dream_rewards
 
     def training_step(self, batch, batch_idx):
         max_epochs = self.trainer.max_epochs
@@ -99,61 +157,12 @@ class ActorCritic(L.LightningModule):
         cash_bin_idx = self.action_bins // 2
         Action_history = torch.full((B, start_t + 1), cash_bin_idx, dtype=torch.long, device=X.device)
 
-        # Databeholdere til vores PPO Rollout (Drømme-buffer)
-        dream_states = []
-        dream_returns = []
-        dream_actions = []
-        dream_action_log_probs = []
-        dream_values = []
-        dream_rewards = []
-
-        # --- SKRIDT 2: DRIFT UD I DRØMME (ROLLOUT FASEN) ---
-        for t in range(self.dream_horizon):
-            # Forudsig handlinger og værdier baseret på den opbyggede drømmehistorik
-            action_logits, value = self(Z_history, Ret_history, Action_history)
-            
-            # Gør logits til sandsynligheder og træk en handling (Udforskning/Sampling)
-            probs = F.softmax(action_logits, dim=-1)
-            dist = torch.distributions.Categorical(probs)
-            action = dist.sample() # [B]
-            log_prob = dist.log_prob(action) # [B]
-
-            with torch.no_grad():
-                # Vi bruger de seneste afkast i historikken som input til verdensmodellens predictor
-                Z_next_pred, logits_pred = self.jepa.predict(Z_history, Ret_history)
-                new_Z = Z_next_pred[:, -1:, :]
-                
-                nyeste_market_logits = logits_pred[:, -1, :] 
-                scaled_market_logits = nyeste_market_logits / self.temperature
-                sampled_market_bin = torch.multinomial(market_probs, num_samples=1)
-                new_market_return = self.jepa.bin_edges[sampled_market_bin].unsqueeze(-1)
-
-            # BEREGN TRADING REWARD (P&L)
-            # Agentens valgte krypto-position (-1.0 til 1.0)
-            reel_position = self.positions[action].unsqueeze(-1).unsqueeze(-1) # [B, 1, 1]
-            # Reward = Markedets afkast * Agentens position (Gevinst ved short hvis markedet falder!)
-            reward = (new_market_return * reel_position).squeeze(-1).squeeze(-1) # [B]
-
-            # Gem data til PPO-opdateringen
-            dream_states.append(Z_history[:, -1, :]) # Nuværende latente tilstand
-            dream_returns.append(Ret_history[:, -1, :])
-            dream_actions.append(action)
-            dream_action_log_probs.append(log_prob)
-            dream_values.append(value.squeeze(-1))
-            dream_rewards.append(reward)
-
-            # Opdater drømmehistorikken autoregressivt til næste skridt
-            Z_history = torch.cat([Z_history, new_Z], dim=1)
-            Ret_history = torch.cat([Ret_history, new_market_return], dim=1)
-            Action_history = torch.cat([Action_history, action.unsqueeze(-1)], dim=1)
-
-        # Stable arrays fra vores drømme [Dream_Horizon, B] -> [B, Dream_Horizon]
-        dream_states = torch.stack(dream_states, dim=1)
-        dream_returns = torch.stack(dream_returns, dim=1)
-        dream_actions = torch.stack(dream_actions, dim=1)
-        dream_old_log_probs = torch.stack(dream_action_log_probs, dim=1).detach()
-        dream_values = torch.stack(dream_values, dim=1)
-        dream_rewards = torch.stack(dream_rewards, dim=1)
+        (dream_states, 
+        dream_returns, 
+        dream_actions, 
+        dream_old_log_probs, 
+        dream_values, 
+        dream_rewards) = self.dream_episodes(Z_history, Ret_history, Action_history)
 
         # --- SKRIDT 3: BEREGN RETURNAFKAST OG ADVANTAGES (GAE) ---
         advantages = torch.zeros_like(dream_rewards)
@@ -180,46 +189,36 @@ class ActorCritic(L.LightningModule):
         # --- SKRIDT 4: PPO OPTIMERINGS-LØKKE (GENBRUG AF DRØMME) ---
         # Vi genbruger drømme-trajektorien for at klemme mest muligt læring ud af dataen
         for ppo_epoch in range(self.ppo_epochs):
-            
-            # Kør drømmene igennem netværket igen for at få NYE logits og værdier
-            # (Da din backbone forventer en sekvens, genskaber vi formatet midlertidigt)
             action_logits, new_values = self(dream_states, dream_returns, dream_actions)
             new_values = new_values.squeeze(-1)
 
-            # Beregn ny sandsynlighedsfordeling og entropi
             probs = F.softmax(action_logits, dim=-1)
             dist = torch.distributions.Categorical(probs)
             
-            # Vi trækker log_probs for de handlinger, som blev taget i drømmen
             new_log_probs = dist.log_prob(dream_actions)
             entropy = dist.entropy().mean()
 
-            # PPO Ratio: r_t(theta) = pi_new(a|s) / pi_old(a|s)
             ratios = torch.exp(new_log_probs - dream_old_log_probs)
 
-            # Normaliser advantages for at stabilisere opdateringen
             norm_advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-            # Surrogat tab 1 og 2 (PPO Clipping mekanismen)
             surr1 = ratios * norm_advantages
             surr2 = torch.clamp(ratios, 1.0 - self.ppo_clip, 1.0 + self.ppo_clip) * norm_advantages
             actor_loss = -torch.min(surr1, surr2).mean()
 
-            # Value Function Loss (Critic) clipped
             critic_loss = F.mse_loss(new_values, returns)
 
-            # SAMLET DELT LOSS (Opdaterer din shared backbone synkront!)
             total_loss = actor_loss + self.vf_coef * critic_loss - self.ent_coef * entropy
 
-            # MANUEL BACKWARD & STEP (Siden automatic_optimization=False)
             opt.zero_grad()
             self.manual_backward(total_loss)
             
-            # Valgfrit: Clipper gradienter manuelt for maksimal stabilitet
             self.clip_gradients(opt, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
             opt.step()
 
         # Log de vigtigste PPO-metrikker til dit WandB dashboard
+        dream_reward = dream_rewards.sum(dim=-1).exp().mean(dim=-1)
+        self.log('ppo/train_dream_reward', dream_reward)
         self.log('ppo/total_loss', total_loss)
         self.log('ppo/actor_loss', actor_loss)
         self.log('ppo/critic_loss', critic_loss)
@@ -227,6 +226,83 @@ class ActorCritic(L.LightningModule):
         self.log('ppo/mean_reward', dream_rewards.mean(), prog_bar=True)
         self.log('ppo/mean_value', dream_values.mean())
         self.log('ppo/dream_temperature', self.temperature)
+
+        def validation_step(self, batch, batch_idx):
+        # --- FIX VARIABELNAVNE ---
+        max_epochs = self.trainer.max_epochs
+        cur_epoch = self.current_epoch
+        temp_progress = cur_epoch / max_epochs
+        self.temperature = self.start_temp - temp_progress * (self.start_temp - self.min_temp)
+        self.temperature = max(self.temperature, self.min_temp)
+        
+        X, y, Ret = batch['sample'], batch['target'], batch['return']
+        B, Seq, _ = Ret.shape
+        
+        with torch.no_grad():
+            Z_start = self.jepa.encode(X) # [B, Seq, d_model]
+            
+        # 1. GENERER ROLLOUT FOR DRØMME-EPISODEN (Som du allerede gør)
+        start_t = Seq - self.dream_horizon - 1
+        Z_history_dream = Z_start[:, :start_t+1, :]
+        Ret_history_dream = Ret[:, :start_t+1, :]
+        cash_bin_idx = self.action_bins // 2
+        Action_history_dream = torch.full((B, start_t + 1), cash_bin_idx, dtype=torch.long, device=X.device)
+
+        (dream_states, 
+         dream_returns, 
+         dream_actions, 
+         dream_old_log_probs, 
+         dream_values, 
+         dream_rewards) = self.dream_episodes(Z_history_dream, Ret_history_dream, Action_history_dream)
+
+        # Kumulativt afkast for drømme-episoden (exp() ophæver log1p())
+        dream_reward = dream_rewards.sum(dim=-1).exp().mean(dim=-1)
+        self.log('ppo/val_dream_reward', dream_reward, on_epoch=True, prog_bar=True)
+
+        # ==================== NY DEL: FAKTISK HISTORISK EPISODE ====================
+        # Vi nulstiller historikken og positionen for den faktiske markeds-kørsel
+        Z_history_actual = Z_start[:, :start_t+1, :]
+        Ret_history_actual = Ret[:, :start_t+1, :]
+        Action_history_actual = torch.full((B, start_t + 1), cash_bin_idx, dtype=torch.long, device=X.device)
+        
+        actual_rewards = []
+        old_position_actual = None
+
+        # Vi kører igennem den samme tids-horisont, men bruger REELT marked-data (Ret)
+        for t in range(self.dream_horizon):
+            # Agenten kigger på historikken og vælger en handling
+            action_logits, _ = self(Z_history_actual, Ret_history_actual, Action_history_actual)
+            
+            # I valideringen på reel data tager vi typisk argmax (bedste gæt) frem for sampling
+            action_actual = torch.argmax(action_logits, dim=-1) # [B]
+
+            # NYT: Vi henter det FAKTISKE, SANDE markedsafkast fra næste minut på børsen
+            target_t = start_idx = start_t + 1 + t
+            new_actual_market_return = Ret[:, target_t:target_t+1, :] # [B, 1, 1]
+
+            # Beregn kurtage baseret på agentens reelle handlinger
+            reel_position_actual = self.positions[action_actual].unsqueeze(-1).unsqueeze(-1) # [B, 1, 1]
+            commission_actual = (reel_position_actual - old_position_actual) * self.com_v if old_position_actual is not None else reel_position_actual * self.com_v
+            old_position_actual = reel_position_actual
+
+            # Gevinst/tab = det REELLE marked * agentens position - kurtage
+            reward_actual = (new_actual_market_return * reel_position_actual - commission_actual).squeeze(-1).squeeze(-1).log1p() # [B]
+            actual_rewards.append(reward_actual)
+
+            # Opdater historikken med de SANDE markedsafkast, de SANDE latente tilstande, 
+            # men med agentens EGNE valg
+            new_Z_actual = Z_start[:, target_t:target_t+1, :] # [B, 1, d_model]
+            
+            Z_history_actual = torch.cat([Z_history_actual, new_Z_actual], dim=1)
+            Ret_history_actual = torch.cat([Ret_history_actual, new_actual_market_return], dim=1)
+            Action_history_actual = torch.cat([Action_history_actual, action_actual.unsqueeze(-1)], dim=1)
+
+        # Beregn det samlede kumulative afkast for den faktiske kørsel
+        actual_rewards = torch.stack(actual_rewards, dim=1) # [B, Dream_Horizon]
+        actual_reward = actual_rewards.sum(dim=-1).exp().mean(dim=-1)
+        
+        # Log det faktiske afkast til dit WandB-dashboard
+        self.log('ppo/val_actual_reward', actual_reward, on_epoch=True, prog_bar=True)
         
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=self.lr)
