@@ -59,7 +59,7 @@ jepa:
 actorcritic:
   name: 'autotrader-v1'
   action_bins: 201
-  num_layers: 32
+  num_layers: 16
   num_heads: 8
   max_len: 64
   dropout: 0.1
@@ -76,6 +76,6 @@ actorcritic:
   commission_value: 0.0005
   training:
     epochs: 1000
-    batch_size: 128
+    batch_size: 8
     log_every_n_steps: 10
 

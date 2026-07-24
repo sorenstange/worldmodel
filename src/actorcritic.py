@@ -140,7 +140,7 @@ class ActorCritic(L.LightningModule):
     def training_step(self, batch, batch_idx):
         max_epochs = self.trainer.max_epochs
         cur_epoch = self.current_epoch
-        temp_progress = nuvaerende_epoke / max_epochs
+        temp_progress = cur_epoch / max_epochs
         self.temperature = self.start_temp - temp_progress * (self.start_temp - self.min_temp)
         # Hent din fælles optimizer
         opt = self.optimizers()
@@ -187,33 +187,58 @@ class ActorCritic(L.LightningModule):
             
             returns = advantages + dream_values
 
-        # --- SKRIDT 4: PPO OPTIMERINGS-LØKKE (GENBRUG AF DRØMME) ---
-        # Vi genbruger drømme-trajektorien for at klemme mest muligt læring ud af dataen
-        for ppo_epoch in range(self.ppo_epochs):
-            action_logits, new_values = self(dream_states, dream_returns, dream_actions)
-            new_values = new_values.squeeze(-1)
+        dream_states_flat = dream_states.reshape(-1, dream_states.size(-1))       # [B * 15, d_model]
+        dream_returns_flat = dream_returns.reshape(-1, dream_returns.size(-1))     # [B * 15, 1]
+        dream_actions_flat = dream_actions.reshape(-1)                             # [B * 15]
+        dream_old_log_probs_flat = dream_old_log_probs.reshape(-1)                 # [B * 15]
+        advantages_flat = advantages.reshape(-1)                                   # [B * 15]
+        returns_flat = returns.reshape(-1)                                         # [B * 15]
+        # ===============================================================================
 
+        # --- SKRIDT 4: PPO OPTIMERINGS-LØKKE (GENBRUG AF DRØMME) ---
+        for ppo_epoch in range(self.ppo_epochs):
+            
+            # 1. Vi sender de fladtrykte sekvenser ind (Da din backbone forventer en sekvens, 
+            # gør vi dem midlertidigt til [M, 1, D], så tidsdimensionen er 1)
+            Z_input = dream_states_flat.unsqueeze(1)    # [B*15, 1, d_model]
+            Ret_input = dream_returns_flat.unsqueeze(1) # [B*15, 1, 1]
+            
+            # For actions skal vi også sende dem ind som en 2D tensor [B*15, 1]
+            Act_input = dream_actions_flat.unsqueeze(1) # [B*15, 1]
+
+            # Kør igennem netværket for at få NYE logits og værdier
+            action_logits, new_values = self(Z_input, Ret_input, Act_input)
+            new_values = new_values.squeeze(-1).squeeze(-1) # [B * 15]
+            action_logits = action_logits.squeeze(1)         # [B * 15, action_bins]
+
+            # 2. Beregn ny sandsynlighedsfordeling (Nu er batch_shape = [B * 15])
             probs = F.softmax(action_logits, dim=-1)
             dist = torch.distributions.Categorical(probs)
             
-            new_log_probs = dist.log_prob(dream_actions)
+            # 3. FIX: Nu har dream_actions_flat OGSÅ formen [B * 15] -> Ingen fejl!
+            new_log_probs = dist.log_prob(dream_actions_flat)
             entropy = dist.entropy().mean()
 
-            ratios = torch.exp(new_log_probs - dream_old_log_probs)
+            # PPO Ratio
+            ratios = torch.exp(new_log_probs - dream_old_log_probs_flat)
 
-            norm_advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            # Normaliser advantages
+            norm_advantages = (advantages_flat - advantages_flat.mean()) / (advantages_flat.std() + 1e-8)
 
+            # Surrogat tab 1 og 2 (PPO Clipping)
             surr1 = ratios * norm_advantages
             surr2 = torch.clamp(ratios, 1.0 - self.ppo_clip, 1.0 + self.ppo_clip) * norm_advantages
             actor_loss = -torch.min(surr1, surr2).mean()
 
-            critic_loss = F.mse_loss(new_values, returns)
+            # Value Function Loss (Critic)
+            critic_loss = F.mse_loss(new_values, returns_flat)
 
+            # Samlet tab
             total_loss = actor_loss + self.vf_coef * critic_loss - self.ent_coef * entropy
 
+            # Manuel optimering
             opt.zero_grad()
             self.manual_backward(total_loss)
-            
             self.clip_gradients(opt, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
             opt.step()
 
