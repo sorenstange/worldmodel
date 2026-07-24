@@ -56,8 +56,8 @@ class ActorCritic(L.LightningModule):
         self.vf_coef = cfg['actorcritic']['vf_coef']       
         self.ppo_epochs = cfg['actorcritic']['ppo_epochs']   
         self.dream_horizon = cfg['actorcritic']['dream_horizon'] 
-        self.start_temp = cfg['actorcrtic']['start_temperature']
-        self.min_temp = cfg['actorcrtic']['min_temperature']
+        self.start_temp = cfg['actorcritic']['start_temperature']
+        self.min_temp = cfg['actorcritic']['min_temperature']
         self.com_v = cfg['actorcritic']['commission_value']
 
         self.automatic_optimization = False
@@ -104,6 +104,7 @@ class ActorCritic(L.LightningModule):
                 
                 nyeste_market_logits = logits_pred[:, -1, :] 
                 scaled_market_logits = nyeste_market_logits / self.temperature
+                market_probs = F.softmax(scaled_market_logits, dim=-1)
                 sampled_market_bin = torch.multinomial(market_probs, num_samples=1)
                 new_market_return = self.jepa.bin_edges[sampled_market_bin].unsqueeze(-1)
 
@@ -227,7 +228,7 @@ class ActorCritic(L.LightningModule):
         self.log('ppo/mean_value', dream_values.mean())
         self.log('ppo/dream_temperature', self.temperature)
 
-        def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx):
         # --- FIX VARIABELNAVNE ---
         max_epochs = self.trainer.max_epochs
         cur_epoch = self.current_epoch
@@ -364,17 +365,17 @@ if __name__ == '__main__':
 
     wandb_logger = WandbLogger(
         entity='rudyhuy',
-        project='ActorCritic' 
+        project='ActorCritic',
+        name=cfg['actorcritic']['name']
     )
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=f"./models/actorcritic/{wandb_logger.experiment.name}/", # Gemmer i ./models/{run_name}/
         filename="actorcritic",
-        monitor="val_loss",
+        monitor="ppo/val_actual_reward",
         mode="min",
         save_top_k=1,
-        save_last=True,
-        save_weights_only=True
+        save_last=True
     )
 
     early_stop_callback = EarlyStopping(
@@ -391,8 +392,6 @@ if __name__ == '__main__':
         max_epochs = cfg['actorcritic']['training']['epochs'],
         accelerator = "auto", 
         devices = "auto",
-        #accumulate_grad_batches = 4,
-        gradient_clip_val = 1.0,
         logger = wandb_logger,
         #callbacks = [checkpoint_callback, early_stop_callback, lr_monitor],
         callbacks = [checkpoint_callback, lr_monitor],

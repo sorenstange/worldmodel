@@ -206,7 +206,8 @@ if __name__ == '__main__':
 
     wandb_logger = WandbLogger(
         entity='rudyhuy',
-        project='jepa' 
+        project='jepa',
+        name=cfg['jepa']['name']
     )
 
     checkpoint_callback = ModelCheckpoint(
@@ -215,8 +216,7 @@ if __name__ == '__main__':
         monitor="val_loss",
         mode="min",
         save_top_k=1,
-        save_last=True,
-        save_weights_only=True
+        save_last=True
     )
 
     early_stop_callback = EarlyStopping(

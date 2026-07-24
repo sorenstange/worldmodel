@@ -9,7 +9,7 @@ class Backbone(nn.Module):
         super().__init__()
         self.pe = PositionalEncoding(d_model, max_len)
         self.layers = nn.ModuleList([
-            TransformerRLBackboneLayer(
+            TransformerBackboneLayer(
                 d_model=d_model,
                 num_heads=num_heads,
                 condition_dim=condition_dim,

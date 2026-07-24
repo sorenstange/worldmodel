@@ -34,28 +34,30 @@ data:
     - '2026-06-01 00:00'
 
 jepa:
-    input_dim: 6 # [Open, High, Low, Close, Volume, Volatility]
-    d_model: 128
-    encoder:
-      num_layers: 16
-      num_heads: 4
-      max_len: 16
-      dropout: 0.1
-    predictor:
-      num_layers: 32
-      num_heads: 8
-      max_len: 64
-      num_bins: 61
-      dropout: 0.1
-    lam_SIGReg: 0.1
-    lam_CE: 1.0
-    lr: 0.0003
-    training:
-      epochs: 1000
-      batch_size: 128
-      log_every_n_steps: 10
+  name: 'jepa-v1'
+  input_dim: 6 # [Open, High, Low, Close, Volume, Volatility]
+  d_model: 128
+  encoder:
+    num_layers: 16
+    num_heads: 4
+    max_len: 16
+    dropout: 0.1
+  predictor:
+    num_layers: 32
+    num_heads: 8
+    max_len: 64
+    num_bins: 61
+    dropout: 0.1
+  lam_SIGReg: 0.1
+  lam_CE: 1.0
+  lr: 0.0003
+  training:
+    epochs: 1000
+    batch_size: 128
+    log_every_n_steps: 10
 
 actorcritic:
+  name: 'autotrader-v1'
   action_bins: 201
   num_layers: 32
   num_heads: 8
