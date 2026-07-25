@@ -171,7 +171,10 @@ class JEPA(L.LightningModule):
             }
         }
     
+
 if __name__ == '__main__':
+    CONTINUE = True
+
     import wandb
     from omegaconf import OmegaConf
     from lightning.pytorch.loggers import WandbLogger
@@ -186,6 +189,7 @@ if __name__ == '__main__':
     wandb.login()
 
     cfg = OmegaConf.load('./config.yaml')
+    checkpoint_path = f"./models/jepa/{cfg['jepa']['name']}/last.ckpt"
 
     logger = set_logger(cfg)
     logger.info('Starting JEPA training')
@@ -202,29 +206,39 @@ if __name__ == '__main__':
                               shuffle = False,
                               num_workers = 3)
     
+    # 1. Initialiser ALTID modellen normalt. 
+    # Vægtene bliver alligevel overskrevet af trainer.fit() om et øjeblik.
     model = JEPA(cfg)
 
-    wandb_logger = WandbLogger(
-        entity='rudyhuy',
-        project='jepa',
-        name=cfg['jepa']['name']
-    )
+    if CONTINUE:
+        # Tving ALLEREDE HER alle interne torch.load kald (inkl. i PL) til at acceptere OmegaConf
+        original_load = torch.load
+        torch.load = lambda *args, **kwargs: original_load(*args, **{**kwargs, 'weights_only': False})
+
+        wandb_logger = WandbLogger(
+            entity='rudyhuy',
+            project='jepa',
+            name=cfg['jepa']['name'],
+            id='fj55chjj',    
+            resume='must'          
+        )
+        # Sæt stien så Trainer ved, den skal genoptage hele træningstilstanden
+        fit_ckpt_path = checkpoint_path
+    else:
+        wandb_logger = WandbLogger(
+            entity='rudyhuy',
+            project='jepa',
+            name=cfg['jepa']['name'],
+        )    
+        fit_ckpt_path = None
 
     checkpoint_callback = ModelCheckpoint(
-        dirpath=f"./models/jepa/{wandb_logger.experiment.name}/", 
+        dirpath=f"./models/jepa/{cfg['jepa']['name']}/", 
         filename="jepa",
         monitor="val_loss",
         mode="min",
         save_top_k=1,
         save_last=True
-    )
-
-    early_stop_callback = EarlyStopping(
-        monitor="val_loss",
-        patience=10,
-        mode="min",
-        check_on_train_epoch_end=False, # Vent altid til valideringen er HELT færdig
-        verbose=True
     )
 
     lr_monitor = LearningRateMonitor(logging_interval='step')
@@ -233,13 +247,11 @@ if __name__ == '__main__':
         max_epochs = cfg['jepa']['training']['epochs'],
         accelerator = "auto", 
         devices = "auto",
-        #accumulate_grad_batches = 4,
         gradient_clip_val = 1.0,
         logger = wandb_logger,
-        #callbacks = [checkpoint_callback, early_stop_callback, lr_monitor],
         callbacks = [checkpoint_callback, lr_monitor],
         log_every_n_steps = cfg['jepa']['training']['log_every_n_steps']
     )
 
-    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
-
+    # 2. Send din betingede fit_ckpt_path med her
+    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader, ckpt_path=fit_ckpt_path)

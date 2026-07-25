@@ -52,7 +52,7 @@ jepa:
   lam_CE: 1.0
   lr: 0.0003
   training:
-    epochs: 1000
+    epochs: 5000
     batch_size: 128
     log_every_n_steps: 10
 
@@ -65,6 +65,7 @@ actorcritic:
   dropout: 0.1
   start_temperature: 1.4
   min_temperature: 0.4
+  temperature_decay: 0.99
   lr: 0.0003
   gamma: 0.99 # Diskounteringsfaktor
   gae_lambda: 0.95 # Generalized Advantage Estimation
@@ -75,7 +76,7 @@ actorcritic:
   dream_horizon: 15 # Hvor langt frem vi drømmer
   commission_value: 0.0005
   training:
-    epochs: 1000
+    epochs: 5000
     batch_size: 8
     log_every_n_steps: 10
 

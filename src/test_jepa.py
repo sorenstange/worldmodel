@@ -78,7 +78,7 @@ def run_trajectory(checkpoint_path, cfg, horizon=15, temperature=0.5):
     return Z_true_segments[0], predicted_trajectory[0], y_true_segments[0], predicted_logits, test_dataset, bin_centers.cpu().numpy()
 
 if __name__ == '__main__':
-    CHECKPOINT = "./models/jepa/charmed-violet-1/last.ckpt" 
+    CHECKPOINT = "./models/jepa/jepa-v1/last.ckpt" 
     CONFIG = "./config.yaml"
     horizon = 15
     

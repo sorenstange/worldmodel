@@ -56,8 +56,9 @@ class ActorCritic(L.LightningModule):
         self.vf_coef = cfg['actorcritic']['vf_coef']       
         self.ppo_epochs = cfg['actorcritic']['ppo_epochs']   
         self.dream_horizon = cfg['actorcritic']['dream_horizon'] 
-        self.start_temp = cfg['actorcritic']['start_temperature']
+        self.temperature = cfg['actorcritic']['start_temperature']
         self.min_temp = cfg['actorcritic']['min_temperature']
+        self.temp_decay = cfg['actorcritic']['temperature_decay']
         self.com_v = cfg['actorcritic']['commission_value']
 
         self.automatic_optimization = False
@@ -138,10 +139,7 @@ class ActorCritic(L.LightningModule):
         return dream_states, dream_returns, dream_actions, dream_old_log_probs, dream_values, dream_rewards
 
     def training_step(self, batch, batch_idx):
-        max_epochs = self.trainer.max_epochs
-        cur_epoch = self.current_epoch
-        temp_progress = cur_epoch / max_epochs
-        self.temperature = self.start_temp - temp_progress * (self.start_temp - self.min_temp)
+        self.temperature = max(self.temp_decay * self.temperature, self.min_temp)
         # Hent din fælles optimizer
         opt = self.optimizers()
         
@@ -217,7 +215,7 @@ class ActorCritic(L.LightningModule):
             
             # 3. FIX: Nu har dream_actions_flat OGSÅ formen [B * 15] -> Ingen fejl!
             new_log_probs = dist.log_prob(dream_actions_flat)
-            entropy = dist.entropy().mean()
+            #entropy = dist.entropy().mean()
 
             # PPO Ratio
             ratios = torch.exp(new_log_probs - dream_old_log_probs_flat)
@@ -234,7 +232,7 @@ class ActorCritic(L.LightningModule):
             critic_loss = F.mse_loss(new_values, returns_flat)
 
             # Samlet tab
-            total_loss = actor_loss + self.vf_coef * critic_loss - self.ent_coef * entropy
+            total_loss = actor_loss + self.vf_coef * critic_loss #- self.ent_coef * entropy
 
             # Manuel optimering
             opt.zero_grad()
@@ -242,25 +240,21 @@ class ActorCritic(L.LightningModule):
             self.clip_gradients(opt, gradient_clip_val=1.0, gradient_clip_algorithm="norm")
             opt.step()
 
+            sch = self.lr_schedulers()
+            sch.step() 
+
         # Log de vigtigste PPO-metrikker til dit WandB dashboard
         dream_reward = dream_rewards.sum(dim=-1).exp().mean(dim=-1)
         self.log('ppo/train_dream_reward', dream_reward)
         self.log('ppo/total_loss', total_loss)
         self.log('ppo/actor_loss', actor_loss)
         self.log('ppo/critic_loss', critic_loss)
-        self.log('ppo/entropy', entropy)
+        #self.log('ppo/entropy', entropy)
         self.log('ppo/mean_reward', dream_rewards.mean(), prog_bar=True)
         self.log('ppo/mean_value', dream_values.mean())
         self.log('ppo/dream_temperature', self.temperature)
 
-    def validation_step(self, batch, batch_idx):
-        # --- FIX VARIABELNAVNE ---
-        max_epochs = self.trainer.max_epochs
-        cur_epoch = self.current_epoch
-        temp_progress = cur_epoch / max_epochs
-        self.temperature = self.start_temp - temp_progress * (self.start_temp - self.min_temp)
-        self.temperature = max(self.temperature, self.min_temp)
-        
+    def validation_step(self, batch, batch_idx):        
         X, y, Ret = batch['sample'], batch['target'], batch['return']
         B, Seq, _ = Ret.shape
         
@@ -350,24 +344,37 @@ class ActorCritic(L.LightningModule):
             }
         }
 
+
 if __name__ == '__main__':
+    import os
+    import torch
     import wandb
+    import omegaconf
     from omegaconf import OmegaConf
     from lightning.pytorch.loggers import WandbLogger
     from torch.utils.data import DataLoader
     from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
     from dotenv import load_dotenv
+    import lightning as L  # Husk at importere lightning som L
 
     from data import CryptoDataset
     from util import set_logger
     from jepa import JEPA
+    from actorcritic import ActorCritic  # <--- Husk at importere din ActorCritic model
 
-    jepa_path = './models/jepa/charmed-violet-1/last.ckpt'
+    # Sæt CONTINUE flaget her (True = fortsæt gammelt run, False = start nyt)
+    CONTINUE = False  
 
     load_dotenv()
     wandb.login()
 
+    # 1. Indlæs config FØRST, så cfg er tilgængelig til stierne
     cfg = OmegaConf.load('./config.yaml')
+
+    jepa_path = f'./models/jepa/{cfg["jepa"]["name"]}/last.ckpt'
+    actorcritic_ckpt_path = f"./models/actorcritic/{cfg['actorcritic']['name']}/last.ckpt"
+
+    # 2. Indlæs den præ-trænede JEPA model (Dette virker fint med weights_only=False)
     jepa = JEPA.load_from_checkpoint(jepa_path, cfg=cfg, weights_only=False)
 
     logger = set_logger(cfg)
@@ -386,29 +393,39 @@ if __name__ == '__main__':
                               shuffle = False,
                               num_workers = 3)
     
+    # Initialiser altid modellen normalt her
     model = ActorCritic(jepa, cfg)
 
-    wandb_logger = WandbLogger(
-        entity='rudyhuy',
-        project='ActorCritic',
-        name=cfg['actorcritic']['name']
-    )
+    # 3. Konfigurer genoptagelse (Resume) baseret på CONTINUE flaget
+    if CONTINUE:
+        # MONKEY PATCH: Tvinger alle interne torch.load kald i Trainer til at acceptere OmegaConf
+        original_load = torch.load
+        torch.load = lambda *args, **kwargs: original_load(*args, **{**kwargs, 'weights_only': False})
 
+        wandb_logger = WandbLogger(
+            entity='rudyhuy',
+            project='ActorCritic',
+            name=cfg['actorcritic']['name'],
+            id='INDTAST_ACTORCRITIC_WANDB_RUN_ID_HER',  # <--- Indsæt dit ActorCritic run ID fra wandb her
+            resume='must'
+        )
+        fit_ckpt_path = actorcritic_ckpt_path
+    else:
+        wandb_logger = WandbLogger(
+            entity='rudyhuy',
+            project='ActorCritic',
+            name=cfg['actorcritic']['name'],
+        )
+        fit_ckpt_path = None
+
+    # Det er mere sikkert at bruge konfigurationsnavnet til dirpath ved resume
     checkpoint_callback = ModelCheckpoint(
-        dirpath=f"./models/actorcritic/{wandb_logger.experiment.name}/", # Gemmer i ./models/{run_name}/
+        dirpath=f"./models/actorcritic/{cfg['actorcritic']['name']}/", 
         filename="actorcritic",
         monitor="ppo/val_actual_reward",
         mode="min",
         save_top_k=1,
         save_last=True
-    )
-
-    early_stop_callback = EarlyStopping(
-        monitor="val_loss",
-        patience=10,
-        mode="min",
-        check_on_train_epoch_end=False, # Vent altid til valideringen er HELT færdig
-        verbose=True
     )
 
     lr_monitor = LearningRateMonitor(logging_interval='step')
@@ -418,12 +435,9 @@ if __name__ == '__main__':
         accelerator = "auto", 
         devices = "auto",
         logger = wandb_logger,
-        #callbacks = [checkpoint_callback, early_stop_callback, lr_monitor],
         callbacks = [checkpoint_callback, lr_monitor],
         log_every_n_steps = cfg['actorcritic']['training']['log_every_n_steps']
     )
 
-    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
-
-
-    
+    # 4. Træn videre eller start forfra baseret på fit_ckpt_path
+    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader, ckpt_path=fit_ckpt_path)
