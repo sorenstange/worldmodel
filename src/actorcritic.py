@@ -56,7 +56,8 @@ class ActorCritic(L.LightningModule):
         self.vf_coef = cfg['actorcritic']['vf_coef']       
         self.ppo_epochs = cfg['actorcritic']['ppo_epochs']   
         self.dream_horizon = cfg['actorcritic']['dream_horizon'] 
-        self.temperature = cfg['actorcritic']['start_temperature']
+        self.start_temperature = cfg['actorcritic']['start_temperature']
+        self.temperature = self.start_temperature
         self.min_temp = cfg['actorcritic']['min_temperature']
         self.temp_decay = cfg['actorcritic']['temperature_decay']
         self.com_v = cfg['actorcritic']['commission_value']
@@ -139,12 +140,15 @@ class ActorCritic(L.LightningModule):
         return dream_states, dream_returns, dream_actions, dream_old_log_probs, dream_values, dream_rewards
 
     def training_step(self, batch, batch_idx):
-        self.temperature = max(self.temp_decay * self.temperature, self.min_temp)
+        cur_epoch = self.current_epoch
+        self.temperature = max(self.temp_decay**cur_epoch * self.start_temperature, self.min_temp)
         # Hent din fælles optimizer
         opt = self.optimizers()
         
         X, y, Ret = batch['sample'], batch['target'], batch['return']
         B, Seq, _ = Ret.shape
+
+        self.jepa.cuda() 
         
         with torch.no_grad():
             Z_start = self.jepa.encode(X) # [B, Seq, d_model]
@@ -162,6 +166,9 @@ class ActorCritic(L.LightningModule):
         dream_old_log_probs, 
         dream_values, 
         dream_rewards) = self.dream_episodes(Z_history, Ret_history, Action_history)
+
+        self.jepa.cpu()
+        torch.cuda.empty_cache()
 
         # --- SKRIDT 3: BEREGN RETURNAFKAST OG ADVANTAGES (GAE) ---
         advantages = torch.zeros_like(dream_rewards)
@@ -215,7 +222,7 @@ class ActorCritic(L.LightningModule):
             
             # 3. FIX: Nu har dream_actions_flat OGSÅ formen [B * 15] -> Ingen fejl!
             new_log_probs = dist.log_prob(dream_actions_flat)
-            #entropy = dist.entropy().mean()
+            entropy = dist.entropy().mean()
 
             # PPO Ratio
             ratios = torch.exp(new_log_probs - dream_old_log_probs_flat)
@@ -249,7 +256,7 @@ class ActorCritic(L.LightningModule):
         self.log('ppo/total_loss', total_loss)
         self.log('ppo/actor_loss', actor_loss)
         self.log('ppo/critic_loss', critic_loss)
-        #self.log('ppo/entropy', entropy)
+        self.log('ppo/entropy', entropy)
         self.log('ppo/mean_reward', dream_rewards.mean(), prog_bar=True)
         self.log('ppo/mean_value', dream_values.mean())
         self.log('ppo/dream_temperature', self.temperature)
@@ -257,6 +264,8 @@ class ActorCritic(L.LightningModule):
     def validation_step(self, batch, batch_idx):        
         X, y, Ret = batch['sample'], batch['target'], batch['return']
         B, Seq, _ = Ret.shape
+
+        self.jepa.cuda() 
         
         with torch.no_grad():
             Z_start = self.jepa.encode(X) # [B, Seq, d_model]
@@ -275,6 +284,9 @@ class ActorCritic(L.LightningModule):
          dream_values, 
          dream_rewards) = self.dream_episodes(Z_history_dream, Ret_history_dream, Action_history_dream)
 
+        self.jepa.cpu()
+        torch.cuda.empty_cache()
+        
         # Kumulativt afkast for drømme-episoden (exp() ophæver log1p())
         dream_reward = dream_rewards.sum(dim=-1).exp().mean(dim=-1)
         self.log('ppo/val_dream_reward', dream_reward, on_epoch=True, prog_bar=True)
