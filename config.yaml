@@ -34,17 +34,17 @@ data:
     - '2026-06-01 00:00'
 
 jepa:
-  name: 'jepa-v1'
+  name: 'jepa-v2'
   input_dim: 6 # [Open, High, Low, Close, Volume, Volatility]
-  d_model: 128
+  d_model: 64
   encoder:
-    num_layers: 16
-    num_heads: 4
+    num_layers: 24
+    num_heads: 8
     max_len: 16
     dropout: 0.1
   predictor:
-    num_layers: 32
-    num_heads: 8
+    num_layers: 48
+    num_heads: 16
     max_len: 64
     num_bins: 61
     dropout: 0.1
@@ -52,7 +52,7 @@ jepa:
   lam_CE: 1.0
   lr: 0.0003
   training:
-    epochs: 5000
+    epochs: 1000
     batch_size: 128
     log_every_n_steps: 10
 

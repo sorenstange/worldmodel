@@ -48,3 +48,56 @@ def gaussian_label_smoothing(y_binned, num_bins, sigma=1.0):
     smooth_targets = smooth_targets / smooth_targets.sum(dim=1, keepdim=True)
     
     return smooth_targets
+
+def delta_equity(x, p, c):
+    x_H = x[1:]
+    x_d = torch.abs(torch.diff(x))
+
+    E = x_H * p - c * x_d + 1.
+    return E
+
+def equity(x, p, c):
+    dE = delta_equity(x, p, c)
+    E = torch.cumprod(dE, dim = -1)
+    return E, E[-1]
+
+def loss_fn_eq(x, p, c):
+    return -torch.sum(torch.log(delta_equity(x, p, c) + 1e-6))
+
+def loss_fn_sh(x, p, c):
+    dE = delta_equity(x, p, c)    
+    sharpe = (torch.mean(dE)) / (torch.std(dE) + 1e-6)
+    return -sharpe
+
+def loss_fn_so(x, p, c):
+    dE = delta_equity(x, p, c)
+    
+    neg_return = dE[dE < 0]
+    
+    if neg_return.numel() > 1:
+        downside_std = torch.std(neg_return)
+    else:
+        downside_std = torch.tensor(0.0, device=dE.device)
+        
+    sortino = (torch.mean(dE)) / (downside_std + 1e-6)
+    return -sortino
+
+def optimal_allocation(p, c, x0 = 0.0, loss_fn = loss_fn_eq, lr = 0.01, steps = 1_000):
+    h = len(p)
+    x0 = torch.tensor([x0], requires_grad=False)
+    u_trainable = torch.zeros_like(p, requires_grad=True)
+    optimizer = torch.optim.Adam([u_trainable], lr=lr)
+
+    for step in range(steps):
+        optimizer.zero_grad()
+        x_trainable = torch.tanh(u_trainable)
+        
+        x_full = torch.cat((x0, x_trainable))
+        loss = loss_fn(x_full, p, c)
+
+        loss.backward()
+        optimizer.step()
+    
+    x = torch.cat((x0, torch.tanh(u_trainable)))
+
+    return x

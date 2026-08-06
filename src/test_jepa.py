@@ -54,16 +54,12 @@ def run_trajectory(checkpoint_path, cfg, horizon=15, temperature=0.5):
             predicted_trajectory.append(new_Z_pred.cpu().numpy())
             predicted_logits.append(new_logits.cpu().numpy())
 
-            # --- AUTOREGRESSIV BETINGELSE (AdaLN-FEEDBACK) ---
-            # Vi overskalerer logits med temperaturen lokalt i løkken for at simulere den sande drøm
             scaled_logits_t = new_logits.squeeze(0).squeeze(0) / temperature
             probs_t = torch.softmax(scaled_logits_t, dim=-1)
             
-            # Træk næste skridts afkast (vi bruger en vægtet sampling pr. default til AdaLN feedbacken)
             sampled_idx = torch.multinomial(probs_t, num_samples=1) # [1]
             new_ret_val = bin_centers[sampled_idx].unsqueeze(0).unsqueeze(0) # [1, 1, 1]
 
-            # Opdater historikken til næste skridt med modellens eget genererede afkast
             Z_history = torch.cat([Z_history, new_Z_pred], dim=1)
             Ret_history = torch.cat([Ret_history, new_ret_val], dim=1)
     
@@ -78,12 +74,12 @@ def run_trajectory(checkpoint_path, cfg, horizon=15, temperature=0.5):
     return Z_true_segments[0], predicted_trajectory[0], y_true_segments[0], predicted_logits, test_dataset, bin_centers.cpu().numpy()
 
 if __name__ == '__main__':
-    CHECKPOINT = "./models/jepa/jepa-v1/last.ckpt" 
+    CHECKPOINT = "./models/jepa/jepa-v2/last.ckpt" 
     CONFIG = "./config.yaml"
-    horizon = 15
+    horizon = 30
     
     # --- TEMPERATURE CONFIGURATION ---
-    temperature = 0.5  # Juster her: >1.0 for mere støj, <1.0 for mere deterministisk adfærd
+    temperature = 1.0  # Juster her: >1.0 for mere støj, <1.0 for mere deterministisk adfærd
     # ---------------------------------
 
     cfg = OmegaConf.load(CONFIG)

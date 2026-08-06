@@ -3,55 +3,22 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 
-def delta_equity(x, p, c):
-    x_H = x[1:]
-    x_d = torch.abs(torch.diff(x))
-
-    E = x_H * p - c * x_d + 1.
-
-    return E
-
-def equity(x, p, c):
-    dE = delta_equity(x, p, c)
-    E = torch.cumprod(dE, dim = -1)
-    return E, E[-1]
-
-def loss_fn(x, p, c):
-    return -torch.sum(torch.log(delta_equity(x, p, c) + 1e-6))
-
-def optimal_allocation(p, c, x0 = 0.0, lr = 0.01, steps = 1_000):
-    h = len(p)
-    x0 = torch.tensor([x0], requires_grad=False)
-    u_trainable = torch.zeros_like(p, requires_grad=True)
-    optimizer = torch.optim.Adam([u_trainable], lr=lr)
-
-    for step in range(steps):
-        optimizer.zero_grad()
-        x_trainable = torch.tanh(u_trainable)
-        
-        x_full = torch.cat((x0, x_trainable))
-        loss = loss_fn(x_full, p, c)
-
-        loss.backward()
-        optimizer.step()
-    
-    x = torch.cat((x0, torch.tanh(u_trainable)))
-
-    return x
+from util import *
+from data import get_OHLCV
+import pandas as pd
 
 if __name__ == '__main__':
-    torch.manual_seed(42)
-
-    h = 15
-    sigma = 0.01
+    SYMBOL = 'BTCUSDT'
+    TIMEFRAME = '15m'
     c = 0.0005
-    
-    p = sigma * torch.randn(h)
-    x = optimal_allocation(p, c)
+    df = get_OHLCV(SYMBOL, TIMEFRAME, SINCE = '2026-08-05 00:00', TO = '2026-08-06 00:00')
 
-    print('x:', x[1:].detach().numpy())
-    print('p:', p.numpy())
+    p = torch.from_numpy(df['Close'].pct_change().dropna().values.astype(np.float32))
 
-    E, E_h = equity(x, p, c)
-    print('E:', E.detach().numpy())
-    print('E_h: ', float(E_h.detach()))
+    x = optimal_allocation(p, c, x0 = 0.0, loss_fn = loss_fn_so, lr = 0.01, steps = 1_000)
+    E, e = equity(x, p, c)
+
+    print('p: ', p)
+    print('x: ', x)
+    print('E: ', E)
+    print('Final Equity: ', e)

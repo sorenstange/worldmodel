@@ -11,6 +11,7 @@ from modules import *
 class JEPA(L.LightningModule):
     def __init__(self, cfg):
         super().__init__()
+        self.max_len = cfg['jepa']['predictor']['max_len']
         self.save_hyperparameters(cfg)
         self.encoder = Encoder(
             input_dim = cfg['jepa']['input_dim'],
@@ -37,7 +38,6 @@ class JEPA(L.LightningModule):
         self.lam_CE = cfg['jepa']['lam_CE']
         self.lr = cfg['jepa']['lr']
         
-        # FIX 2: Registreret som buffer, så den automatisk følger med over på GPU (cuda)
         self.register_buffer("bin_edges", torch.linspace(-cfg['data']['extreme_value'], cfg['data']['extreme_value'] + 1e-5, cfg['data']['num_bins'] + 1))
 
     def encode(self, X):
@@ -81,16 +81,58 @@ class JEPA(L.LightningModule):
 
         L_state = self.MSELoss(Z_hat, Z_target)
         L_ce = self.CrossEntropyLoss(logits_flat, y_target_flat) 
-        L_sigreg = self.SIGRegLoss(Z.permute(1, 0, 2))
+        #L_sigreg = self.SIGRegLoss(Z.permute(1, 0, 2))
 
-        L = L_state + self.lam_CE * L_ce + self.lam_SIGReg * L_sigreg
+        L = L_state + self.lam_CE * L_ce #+ self.lam_SIGReg * L_sigreg
 
         self.log('train_state_loss', L_state)
         self.log('train_ce_loss', L_ce)
-        self.log('train_sigreg_loss', L_sigreg)
+        #self.log('train_sigreg_loss', L_sigreg)
         self.log('train_loss', L)
 
         return L
+
+    def imagine(self, Z_history, Ret_history, horizon = 15, temperature = 1.0, max_len = 64):
+        if Ret_history.dim() == 2:
+            Ret_history = Ret_history.unsqueeze(-1) # Form: [B, T_historisk, 1]
+        bin_centers = (self.bin_edges[:-1] + self.bin_edges[1:]) / 2.0
+
+        dream_states = []
+        dream_logits = []
+        dream_ret = []
+
+        if Z_history.size(1) >= max_len:
+            Z_history = Z_history[:, -max_len:, :]
+
+        if Ret_history.size(1) >= max_len:
+            Ret_history = Ret_history[:, -max_len:, :]
+
+        for t in range(horizon):
+            Z_next_pred, logits = self.predict(Z_history, Ret_history)
+
+            new_Z_pred = Z_next_pred[:, -1:, :]
+            new_logits = logits[:, -1:, :] # Form: [B, 1, num_bins]
+
+            scaled_logits_t = new_logits.squeeze(0).squeeze(0) / temperature
+            probs_t = torch.softmax(scaled_logits_t, dim=-1)
+
+            sampled_idx = torch.multinomial(probs_t, num_samples=1) # [1]
+            new_ret = bin_centers[sampled_idx].unsqueeze(0).unsqueeze(0) # [1, 1, 1]
+
+            Z_history = torch.cat([Z_history, new_Z_pred], dim=1)
+            Ret_history = torch.cat([Ret_history, new_ret], dim=1)
+
+            if Z_history.size(1) >= max_len:
+                Z_history = Z_history[:, -max_len:, :]
+
+            if Ret_history.size(1) >= max_len:
+                Ret_history = Ret_history[:, -max_len:, :]
+
+            dream_states.append(new_Z_pred)
+            dream_logits.append(scaled_logits_t.unsqueeze(0).unsqueeze(0))
+            dream_ret.append(new_ret)
+
+        return torch.concatenate(dream_states, dim = 1), torch.concatenate(dream_logits, dim = 1), torch.concatenate(dream_ret, dim = 1)
 
     def validation_step(self, batch, batch_idx):
         X, y, Ret = batch['sample'], batch['target'], batch['return']
@@ -141,15 +183,15 @@ class JEPA(L.LightningModule):
             Z_history = torch.cat([Z_history, new_Z_pred], dim=1)
             Ret_history = torch.cat([Ret_history, new_Ret], dim=1)
 
-        L_sigreg = self.SIGRegLoss(Z.permute(1, 0, 2))
+        #L_sigreg = self.SIGRegLoss(Z.permute(1, 0, 2))
         L_state_loss = torch.stack(autoreg_losses).mean()
-        val_loss_autoreg = L_state_loss + self.lam_SIGReg * L_sigreg
+        val_loss_autoreg = L_state_loss #+ self.lam_SIGReg * L_sigreg
         val_ce_autoreg = torch.stack(autoreg_ce_losses).mean()
 
         self.log('val_loss', val_loss_autoreg, on_step=False, on_epoch=True, prog_bar=True)
         self.log('val_state_loss', L_state_loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log('val_ce_loss', val_ce_autoreg, on_step=False, on_epoch=True)
-        self.log('val_sigreg_loss', L_sigreg, on_step=False, on_epoch=True)
+        #self.log('val_sigreg_loss', L_sigreg, on_step=False, on_epoch=True)
 
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=self.lr)
@@ -219,7 +261,7 @@ if __name__ == '__main__':
             entity='rudyhuy',
             project='jepa',
             name=cfg['jepa']['name'],
-            id='fj55chjj',    
+            id='yf3e2m64',    
             resume='must'          
         )
         # Sæt stien så Trainer ved, den skal genoptage hele træningstilstanden
