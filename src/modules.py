@@ -1,74 +1,43 @@
 import torch
 import torch.nn as nn
 
-class Backbone(nn.Module):
-    def __init__(self, d_model, num_layers, num_heads, max_len, condition_dim=4, dropout=0.1):
-        """
-        Den samlede kausale Transformer-backbone for dit Actor-Critic netværk.
-        """
-        super().__init__()
-        self.pe = PositionalEncoding(d_model, max_len)
-        self.layers = nn.ModuleList([
-            TransformerBackboneLayer(
-                d_model=d_model,
-                num_heads=num_heads,
-                condition_dim=condition_dim,
-                dropout=dropout
-            ) for _ in range(num_layers)
-        ])
-
-    def forward(self, z, condition):
-        """
-        z: [B, T, d_model]
-        condition: [B, T, condition_dim] eller [B, condition_dim]
-        """
-        if z.dim() == 2:
-            z = z.unsqueeze(0)
-            
-        B, seq_len, _ = z.shape
-        
-        # Opret en fejlfri kausal maske til dit custom attention-modul
-        mask = torch.tril(torch.ones(seq_len, seq_len, device=z.device)) == 1
-        mask = mask.unsqueeze(0).unsqueeze(0) # [1, 1, seq_len, seq_len] til broadcasting
-
-        # Tilføj positionel kodning
-        x = self.pe(z)
-        
-        # Kør sekvensen igennem de betingede lag
-        for layer in self.layers:
-            x = layer(x, condition, mask)
-            
-        return x
-
 class Predictor(nn.Module):
-    def __init__(self, d_model, num_layers, num_heads, max_len, num_bins, dropout = 0.1):
+    def __init__(self, d_model, num_layers, num_heads, max_len, condition_dim = 2, dropout = 0.1):
         super().__init__()
         self.pe = PositionalEncoding(d_model, max_len)
         self.layers = nn.ModuleList([
             TransformerPredictorLayer(d_model = d_model, 
                                     num_heads = num_heads,
+                                    condition_dim = condition_dim,
                                     dropout = dropout) 
                                     for _ in range(num_layers)
                                     ])
-        self.return_head = nn.Sequential(
-            nn.Linear(d_model, 2*d_model),
-            nn.LayerNorm(2*d_model),       
-            nn.SiLU(),
-            nn.Dropout(dropout),         
-            nn.Linear(2*d_model, num_bins)
-        )
+                                    
+        self.max_len = max_len
 
-    def forward(self, x, ret):
+    def forward(self, x, ret, act):
         if x.dim() == 2:
             x = x.unsqueeze(0)
+        if ret.dim() == 2:
+            ret = ret.unsqueeze(-1)
+        if act.dim() == 2:
+            ret = act.unsqueeze(-1)
+
+        cond = torch.cat([ret, act], dim=-1)
+        
         _, seq_len, _ = x.shape
+
+        if seq_len > self.max_len:
+            x = x[:, -self.max_len, :]
+            seq_len = self.max_len
+
         mask = self.create_causal_mask(seq_len).to(x.device)
 
         x = self.pe(x)
         for layer in self.layers:
-            x = layer(x, ret, mask)
+            x = layer(x, cond, mask)
 
-        return x, self.return_head(x)
+        return x
 
     def create_causal_mask(self, seq_len):
         return torch.tril(torch.ones(seq_len, seq_len)).unsqueeze(0).unsqueeze(0)
@@ -153,33 +122,6 @@ class AdaLN(nn.Module):
         gamma, beta = scale_shift.chunk(2, dim=-1)
         return normed_x * (1.0 + gamma) + beta
 
-class SIGReg(torch.nn.Module):
-    def __init__(self, knots=17, num_proj=1024):
-        super().__init__()
-        self.num_proj = num_proj
-        t = torch.linspace(0, 3, knots, dtype=torch.float32)
-        dt = 3 / (knots - 1)
-        weights = torch.full((knots,), 2 * dt, dtype=torch.float32)
-        weights[[0, -1]] = dt
-        window = torch.exp(-t.square() / 2.0)
-        self.register_buffer("t", t)
-        self.register_buffer("phi", window)
-        self.register_buffer("weights", weights * window)
-
-    def forward(self, proj):
-        """
-        proj: (T, B, D)
-        """
-        # sample random projections
-        A = torch.randn(proj.size(-1), self.num_proj, device=proj.device)
-        A = A.div_(A.norm(p=2, dim=0))
-        # compute the epps-pulley statistic
-        x_t = (proj @ A).unsqueeze(-1) * self.t
-        err = (x_t.cos().mean(-3) - self.phi).square() + x_t.sin().mean(-3).square()
-        statistic = (err @ self.weights) * proj.size(-2)
-        return statistic.mean() # average over projections and time
-
-
 class MultiHeadSelfAttention(nn.Module):
     def __init__(self, d_model, num_heads, dropout=0.1):
         super().__init__()
@@ -241,47 +183,8 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-class TransformerBackboneLayer(nn.Module):
-    def __init__(self, d_model, num_heads, condition_dim=4, dropout=0.1):
-        """
-        Delt Transformer-lag til Actor-Critic backbone.
-        Betinges af både markedets afkast og agentens handlinger via AdaLN.
-        """
-        super().__init__()
-        self.self_attn = MultiHeadSelfAttention(
-            d_model=d_model,
-            num_heads=num_heads,
-            dropout=dropout
-        )
-        # FFN dimension sat til 2*d_model som i dine andre moduler
-        self.ffn = FeedForward(d_model, 2 * d_model, dropout)
-
-        # AdaLN modtager den samlede dimension (afkast + handlinger)
-        self.norm1 = AdaLN(d_model, condition_dim)
-        self.norm2 = AdaLN(d_model, condition_dim)
-
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-
-    def forward(self, x, condition, mask=None):
-        """
-        x: [B, T, d_model] (Latente tilstande)
-        condition: [B, T, condition_dim] (Splejset return + action)
-        """
-        # Pre-LN Attention gren betinget på marked + handling
-        norm_x = self.norm1(x, condition)
-        attn_out = self.self_attn(norm_x, mask)
-        x = x + self.dropout1(attn_out)
-
-        # Pre-LN FeedForward gren betinget på marked + handling
-        norm_x2 = self.norm2(x, condition)
-        ff_out = self.ffn(norm_x2)
-        x = x + self.dropout2(ff_out)
-
-        return x
-
 class TransformerPredictorLayer(nn.Module):
-    def __init__(self, d_model, num_heads, dropout=0.1):
+    def __init__(self, d_model, num_heads, condition_dim, dropout=0.1):
         super().__init__()
 
         self.self_attn = MultiHeadSelfAttention(
@@ -292,20 +195,20 @@ class TransformerPredictorLayer(nn.Module):
 
         self.ffn = FeedForward(d_model, 2*d_model, dropout)
 
-        self.norm1 = AdaLN(d_model)
-        self.norm2 = AdaLN(d_model)
+        self.norm1 = AdaLN(d_model, condition_dim)
+        self.norm2 = AdaLN(d_model, condition_dim)
 
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
-    def forward(self, x, ret, mask=None):
+    def forward(self, x, cond, mask=None):
         # Pre-LN på Attention grenen
-        norm_x = self.norm1(x, ret)
+        norm_x = self.norm1(x, cond)
         attn_out = self.self_attn(norm_x, mask)
         x = x + self.dropout1(attn_out)
 
         # Pre-LN på FeedForward grenen
-        norm_x2 = self.norm2(x, ret)
+        norm_x2 = self.norm2(x, cond)
         ff_out = self.ffn(norm_x2)
         x = x + self.dropout2(ff_out)
 
@@ -341,25 +244,3 @@ class TransformerEncoderLayer(nn.Module):
         x = x + self.dropout2(ff_out)
 
         return x
-
-if __name__ == '__main__':
-    # def __init__(self, d_model, num_layers, num_heads, max_len, num_bins, dropout = 0.1)
-    from omegaconf import OmegaConf
-    cfg = OmegaConf.load('./config.yaml')
-    '''predictor = Predictor(
-        d_model = cfg['jepa']['d_model'],
-        num_layers = cfg['jepa']['predictor']['num_layers'],
-        num_heads = cfg['jepa']['predictor']['num_heads'],
-        max_len = cfg['jepa']['predictor']['max_len'],
-        num_bins = cfg['jepa']['predictor']['num_bins']
-    )
-
-    Z = torch.rand((cfg['jepa']['training']['batch_size'], cfg['jepa']['predictor']['max_len'], cfg['jepa']['d_model']))
-    Z_prime = predictor(Z)'''
-    from data import CryptoDataset
-    from util import set_logger
-    logger = set_logger(cfg)
-    data = CryptoDataset(cfg)
-    t = data[0]['target']
-    print(t.shape)
-    print(t)

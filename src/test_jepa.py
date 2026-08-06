@@ -74,16 +74,42 @@ def run_trajectory(checkpoint_path, cfg, horizon=15, temperature=0.5):
     return Z_true_segments[0], predicted_trajectory[0], y_true_segments[0], predicted_logits, test_dataset, bin_centers.cpu().numpy()
 
 if __name__ == '__main__':
-    CHECKPOINT = "./models/jepa/jepa-v2/last.ckpt" 
-    CONFIG = "./config.yaml"
+    batch_size = 1
     horizon = 30
-    
-    # --- TEMPERATURE CONFIGURATION ---
-    temperature = 1.0  # Juster her: >1.0 for mere støj, <1.0 for mere deterministisk adfærd
-    # ---------------------------------
+    temperature = 1.0 
 
-    cfg = OmegaConf.load(CONFIG)
+    cfg = OmegaConf.load('./config.yaml')
     logger = set_logger(cfg)
+
+    test_dataset = CryptoDataset(cfg, mode='test')
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
+    batch = next(iter(test_loader))
+    
+    model = JEPA.load_from_checkpoint(f'./models/jepa/{cfg['jepa']['name']}/last.ckpt', cfg=cfg, weights_only=False)
+    model.eval()
+    if torch.cuda.is_availabe():
+        model.cuda()
+        X = batch['sample'].cuda()      
+        y_true = batch['target'].cuda()  
+        ret_true = batch['return'].cuda() 
+        a_true = batch['action'].cuda()
+    else:
+        X = batch['sample']   
+        y_true = batch['target']
+        ret_true = batch['return']
+        a_true = batch['action']
+
+    bin_edges = model.bin_edges # Henter direkte fra modellens registrerede buffer
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+
+    with torch.no_grad():
+        Z_true = model.encode(X)
+        start_idx = Z_true.size(1) - horizon - 1
+        
+        Z_hist = Z_true[:, :start_idx+1, :]          # [1, T_hist, d_model]
+        Ret_hist = ret_true[:, :start_idx+1, :]      # [1, T_hist, 1]
+
+        d_states, d_logits, d_ret, d_act = model.imagine(Z_hist, Ret_hist, horizon = horizon, temperature = temperature)
 
     # Kør den opdaterede banegenerering
     Z_true, Z_pred, Y_true, Y_pred_logits, test_dataset, bin_centers = run_trajectory(CHECKPOINT, cfg, horizon, temperature)

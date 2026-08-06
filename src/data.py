@@ -10,55 +10,63 @@ from torch.utils.data import Dataset
 from binance.client import Client
 from binance.enums import *
 
-from util import gaussian_label_smoothing
+from util import *
 
 class CryptoDataset(Dataset):
     def __init__(self, cfg, mode='training'):
         logger = logging.getLogger(cfg['experiment_name'])
-        logger.info(f'Initializing CryptoDataset. Mode: {mode}. Window size: {cfg["data"]["window_size"]}')
+        logger.info(f'Initializing CryptoDataset. Mode: {mode}.'
+                    f' Window size: {cfg["data"]["window_size"]}'
+                    )
 
         self.samples = []
-        self.targets = [] # Dette bruges midlertidigt som vores liste af floats i loopet
+        self.returns = []
+        self.actions = []
 
         data, targets = load_data(cfg, mode)
+        loss_fn = make_constrained_loss(loss_fn_so)
 
         for d, t in zip(data, targets):
             d = torch.from_numpy(d)
             t = torch.from_numpy(t)
 
-            # Pak inputs i vinduer og sekvenser
             d = d.unfold(0, cfg['data']['window_size'], cfg['data']['window_size']).transpose(1, 2)
             d = d.unfold(0, cfg['data']['sequence_length'], cfg['data']['stride']).permute(0, 3, 1, 2)
             
-            # Beregn det kumulative afkast for hvert vindue
             t = (t + 1.).unfold(0, cfg['data']['window_size'], cfg['data']['window_size'])
             t = (t.cumprod(1) - 1.)[:, -1]
             t = t.unfold(0, cfg['data']['sequence_length'], cfg['data']['stride'])
 
+            a = optimal_allocation(
+                t, 
+                cfg['data']['actions']['commission_value'], 
+                x0 = 0.0, 
+                loss_fn = loss_fn, 
+                lr = 0.01, 
+                steps = 1_000
+                )
+            
             self.samples.append(d)
-            self.targets.append(t)
+            self.returns.append(t)
+            self.actions.append(a[:, 1:].detach())
         
-        # Saml listerne til store 2D/3D tensorer
         self.samples = torch.concatenate(tuple(self.samples))
-        raw_returns = torch.concatenate(tuple(self.targets)) # Form: [B, Seq]
+        self.returns = torch.concatenate(tuple(self.returns))
+        self.actions = torch.concatenate(tuple(self.actions))
 
-        B, Seq = raw_returns.shape
+        self.returns, self.return_targets = preprocess_classes(
+            self.returns, 
+            cfg['data']['returns']['min_value'],
+            cfg['data']['returns']['max_value'],
+            cfg['data']['returns']['num_bins']
+            )
 
-        # Sørg for at gemme de rå float-afkast i det helt rigtige 3D-format [B, Seq, 1] til din AdaLN
-        self.returns = raw_returns.view(B, Seq, 1).float()
-
-        # Flad ud midlertidigt for at køre spand-sortering (bucketize)
-        t_flat = raw_returns.view(B * Seq)
-
-        self.min_val, self.max_val = -cfg['data']['extreme_value'], cfg['data']['extreme_value']
-        t_flat = t_flat.clamp(self.min_val, self.max_val)
-
-        self.bin_edges = torch.linspace(self.min_val, self.max_val + 1e-5, cfg['data']['num_bins'] + 1)
-        t_flat = torch.bucketize(t_flat, self.bin_edges) - 1
-        t_flat = torch.clamp(t_flat, 0, cfg['data']['num_bins'] - 1)
-
-        # Genskab den rigtige 3D form [B, Seq, 1] for dine targets til CrossEntropyLoss
-        self.targets = t_flat.view(B, Seq, 1).long()
+        self.actions, self.action_targets = preprocess_classes(
+            self.actions,
+            cfg['data']['actions']['min_value'],
+            cfg['data']['actions']['max_value'],
+            cfg['data']['actions']['num_bins']
+        )
 
         logger.info(f"Dataset created! Mode: {mode}. Number of Sequences: {self.samples.size(0):,}")
 
@@ -69,8 +77,10 @@ class CryptoDataset(Dataset):
         # Alle tre elementer returneres nu med matchende sekvens-dimensioner [Seq, D]
         return {
             'sample': self.samples[idx, :], 
-            'target': self.targets[idx, :], 
-            'return': self.returns[idx, :]
+            'return': self.returns[idx, :],
+            'return_target': self.return_targets[idx, :],
+            'action': self.actions[idx, :],
+            'action_target': self.action_targets[idx, :],
         }
 
 

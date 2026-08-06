@@ -11,8 +11,8 @@ from modules import *
 class JEPA(L.LightningModule):
     def __init__(self, cfg):
         super().__init__()
-        self.max_len = cfg['jepa']['predictor']['max_len']
         self.save_hyperparameters(cfg)
+
         self.encoder = Encoder(
             input_dim = cfg['jepa']['input_dim'],
             d_model = cfg['jepa']['d_model'],
@@ -21,24 +21,52 @@ class JEPA(L.LightningModule):
             max_len = cfg['jepa']['encoder']['max_len'],
             dropout = cfg['jepa']['encoder']['dropout']
         )
+
         self.predictor = Predictor(
             d_model = cfg['jepa']['d_model'],
             num_layers = cfg['jepa']['predictor']['num_layers'],
             num_heads = cfg['jepa']['predictor']['num_heads'],
             max_len = cfg['jepa']['predictor']['max_len'],
-            num_bins = cfg['jepa']['predictor']['num_bins'],
             dropout = cfg['jepa']['predictor']['dropout']
         )
 
+        self.return_head = nn.Sequential(
+            nn.Linear(cfg['jepa']['d_model'], 2*cfg['jepa']['d_model']),
+            nn.LayerNorm(2*cfg['jepa']['d_model']),       
+            nn.SiLU(),
+            nn.Dropout(cfg['jepa']['return_head']['dropout']),         
+            nn.Linear(2*cfg['jepa']['d_model'], cfg['jepa']['return_head']['num_bins'])
+        )
+        self.register_buffer("return_edges", 
+                            torch.linspace(
+                                cfg['jepa']['return_head']['min_value'], 
+                                cfg['jepa']['return_head']['max_value'], 
+                                cfg['jepa']['return_head']['num_bins']
+                                )
+                            )
+
+        self.action_head = nn.Sequential(
+            nn.Linear(cfg['jepa']['d_model'], 2*cfg['jepa']['d_model']),
+            nn.LayerNorm(2*cfg['jepa']['d_model']),       
+            nn.SiLU(),
+            nn.Dropout(cfg['jepa']['action_head']['dropout']),         
+            nn.Linear(2*cfg['jepa']['d_model'], cfg['jepa']['action_head']['num_bins'])
+        )
+        self.register_buffer("action_edges", 
+                            torch.linspace(
+                                cfg['jepa']['action_head']['min_value'], 
+                                cfg['jepa']['action_head']['max_value'], 
+                                cfg['jepa']['action_head']['num_bins']
+                                )
+                            )
+
         self.MSELoss = nn.MSELoss()
-        self.SIGRegLoss = SIGReg()
         self.CrossEntropyLoss = nn.CrossEntropyLoss()
 
-        self.lam_SIGReg = cfg['jepa']['lam_SIGReg']
-        self.lam_CE = cfg['jepa']['lam_CE']
-        self.lr = cfg['jepa']['lr']
+        self.lr = cfg['jepa']['training']['lr']
+        self.epochs = cfg['jepa']['training']['epochs']
+        self.warmup = cfg['jepa']['training']['warmup']
         
-        self.register_buffer("bin_edges", torch.linspace(-cfg['data']['extreme_value'], cfg['data']['extreme_value'] + 1e-5, cfg['data']['num_bins'] + 1))
 
     def encode(self, X):
         if X.dim() == 4:
@@ -52,47 +80,88 @@ class JEPA(L.LightningModule):
         Z = Z.view(B, Seq, -1)
         return Z
 
-    def predict(self, Z, Ret):
-        Zp1, logits = self.predictor(Z, Ret)
-        return Zp1, logits
+    def predict(self, Z, Ret, Act):
+        Zp1 = self.predictor(Z, Ret, Act)
+        ret_logits = self.return_head(Zp1)
+        act_logits = self.action_head(Zp1)
+        return Zp1, ret_logits, act_logits
 
-    def forward(self, X, Ret):
+    def forward(self, X, Ret, Act):
         Z = self.encode(X)
-        return self.predict(Z, Ret)
+        Zp1, ret_logits, act_logits = self.predict(Z, Ret, Act)
+        return Z, Zp1, ret_logits, act_logits
 
     def training_step(self, batch, batch_idx):
-        X, y, Ret = batch['sample'], batch['target'], batch['return']
+        X = batch['sample']
+        Ret, Ret_target = batch['return'], batch['return_target']
+        Act, Act_target = batch['action'], batch['action_target']
+
         Z = self.encode(X)
 
         Z_in = Z[:, :-1]
-        
-        # Sørg for at Ret_in altid er en 3D tensor [B, Seq-1, 1] for AdaLN konsistens
         Ret_in = Ret[:, :-1]
-        if Ret_in.dim() == 2:
-            Ret_in = Ret_in.unsqueeze(-1)
-            
+        Act_in = Act[:, :-1]
+
+        Z_hat, ret_logits, act_logits = self.predict(Z_in, Ret_in, Act_in)
+
         Z_target = Z[:, 1:]
-
-        Z_hat, logits = self.predict(Z_in, Ret_in)
-
-        y_target = y[:, 1:] 
-        logits_flat = logits.reshape(-1, logits.size(-1))
-        y_target_flat = y_target.reshape(-1).long() # Sikrer heltal (long) til CrossEntropy
+        act_target = Act_target[:, 1:]
+        ret_target = Ret_target[:, 1:] 
 
         L_state = self.MSELoss(Z_hat, Z_target)
-        L_ce = self.CrossEntropyLoss(logits_flat, y_target_flat) 
-        #L_sigreg = self.SIGRegLoss(Z.permute(1, 0, 2))
 
-        L = L_state + self.lam_CE * L_ce #+ self.lam_SIGReg * L_sigreg
+        ret_logits_flat = ret_logits.reshape(-1, ret_logits.size(-1))
+        ret_target_flat = ret_target.reshape(-1).long()
+        L_ret = self.CrossEntropyLoss(ret_logits_flat, ret_target_flat) 
 
-        self.log('train_state_loss', L_state)
-        self.log('train_ce_loss', L_ce)
-        #self.log('train_sigreg_loss', L_sigreg)
-        self.log('train_loss', L)
+        act_logits_flat = act_logits.reshape(-1, act_logits.size(-1))
+        act_target_flat = act_target.reshape(-1).long()
+        L_act = self.CrossEntropyLoss(act_logits_flat, act_target_flat) 
+
+        L = L_state + L_ret + L_act
+
+        self.log('train/state_loss', L_state)
+        self.log('train/return_loss', L_ret)
+        self.log('train/action_loss', L_act)
+        self.log('train/loss', L)
 
         return L
 
-    def imagine(self, Z_history, Ret_history, horizon = 15, temperature = 1.0, max_len = 64):
+    def validation_step(self, batch, batch_idx):
+        X = batch['sample']
+        Ret, Ret_target = batch['return'], batch['return_target']
+        Act, Act_target = batch['action'], batch['action_target']
+
+        Z = self.encode(X)
+        Z_in = Z[:, :-1]
+        
+        Ret_in = Ret[:, :-1]
+        Act_in = Act[:, :-1]
+
+        Z_hat, ret_logits, act_logits = self.predict(Z_in, Ret_in, Act_in)
+
+        Z_target = Z[:, 1:]
+        act_target = Act_target[:, 1:]
+        ret_target = Ret_target[:, 1:] 
+
+        L_state = self.MSELoss(Z_hat, Z_target)
+
+        ret_logits_flat = ret_logits.reshape(-1, ret_logits.size(-1))
+        ret_target_flat = ret_target.reshape(-1).long()
+        L_ret = self.CrossEntropyLoss(ret_logits_flat, ret_target_flat) 
+
+        act_logits_flat = act_logits.reshape(-1, act_logits.size(-1))
+        act_target_flat = act_target.reshape(-1).long()
+        L_act = self.CrossEntropyLoss(act_logits_flat, act_target_flat) 
+
+        L = L_state + L_ret + L_act
+
+        self.log('val/state_loss', L_state, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val/return_loss', L_ret, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val/action_loss', L_act, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val/loss', L, on_step=False, on_epoch=True, prog_bar=True)
+
+    def imagine(self, Z_history, Ret_history, horizon = 15, temperature = 1.0):
         if Ret_history.dim() == 2:
             Ret_history = Ret_history.unsqueeze(-1) # Form: [B, T_historisk, 1]
         bin_centers = (self.bin_edges[:-1] + self.bin_edges[1:]) / 2.0
@@ -100,15 +169,17 @@ class JEPA(L.LightningModule):
         dream_states = []
         dream_logits = []
         dream_ret = []
+        dream_sampled_idx = []
+        dream_actions = []
 
-        if Z_history.size(1) >= max_len:
-            Z_history = Z_history[:, -max_len:, :]
+        if Z_history.size(1) >= self.max_len:
+            Z_history = Z_history[:, -self.max_len:, :]
 
-        if Ret_history.size(1) >= max_len:
-            Ret_history = Ret_history[:, -max_len:, :]
+        if Ret_history.size(1) >= self.max_len:
+            Ret_history = Ret_history[:, -self.max_len:, :]
 
         for t in range(horizon):
-            Z_next_pred, logits = self.predict(Z_history, Ret_history)
+            Z_next_pred, logits, action = self.predict(Z_history, Ret_history)
 
             new_Z_pred = Z_next_pred[:, -1:, :]
             new_logits = logits[:, -1:, :] # Form: [B, 1, num_bins]
@@ -122,81 +193,25 @@ class JEPA(L.LightningModule):
             Z_history = torch.cat([Z_history, new_Z_pred], dim=1)
             Ret_history = torch.cat([Ret_history, new_ret], dim=1)
 
-            if Z_history.size(1) >= max_len:
-                Z_history = Z_history[:, -max_len:, :]
+            if Z_history.size(1) >= self.max_len:
+                Z_history = Z_history[:, -self.max_len:, :]
 
-            if Ret_history.size(1) >= max_len:
-                Ret_history = Ret_history[:, -max_len:, :]
+            if Ret_history.size(1) >= self.max_len:
+                Ret_history = Ret_history[:, -self.max_len:, :]
 
             dream_states.append(new_Z_pred)
             dream_logits.append(scaled_logits_t.unsqueeze(0).unsqueeze(0))
             dream_ret.append(new_ret)
+            dream_sampled_idx.append(sampled_idx)
+            dream_actions.append(action)
 
-        return torch.concatenate(dream_states, dim = 1), torch.concatenate(dream_logits, dim = 1), torch.concatenate(dream_ret, dim = 1)
+        return torch.concatenate(dream_states, dim = 1), torch.concatenate(dream_logits, dim = 1), torch.concatenate(dream_ret, dim = 1), torch.concatenate(dream_actions, dim = 1)
 
-    def validation_step(self, batch, batch_idx):
-        X, y, Ret = batch['sample'], batch['target'], batch['return']
-        B = X.size(0)
-        Z = self.encode(X)  
-
-        horizon = 15  
-        start_idx = Z.size(1) - horizon - 1
-        
-        Z_history = Z[:, :start_idx+1, :]  
-        Ret_history = Ret[:, :start_idx+1]
-        if Ret_history.dim() == 2:
-            Ret_history = Ret_history.unsqueeze(-1) # Form: [B, T_historisk, 1]
-
-        autoreg_losses = []
-        autoreg_ce_losses = []
-
-        # Find midtpunkterne af dine bins til at afgøre det forventede afkast (returns)
-        bin_centers = (self.bin_edges[:-1] + self.bin_edges[1:]) / 2.0
-
-        for t in range(horizon):
-            Z_next_pred, logits = self.predict(Z_history, Ret_history)
-
-            new_Z_pred = Z_next_pred[:, -1:, :]
-            new_logits = logits[:, -1:, :] # Form: [B, 1, num_bins]
-
-            # FIX 1 & 3: Find argmax pr. batch-eksempel separat
-            best_bins = torch.argmax(new_logits, dim=-1) # Form: [B, 1]
-            
-            # Smaple de faktiske numeriske returns ud fra dine bin_centers
-            # Formen bliver [B, 1, 1] så den passer direkte til din AdaLN
-            new_Ret = bin_centers[best_bins].unsqueeze(-1) 
-
-            target_t = start_idx + 1 + t
-            Z_target_t = Z[:, target_t:target_t+1, :]
-            y_target_t = y[:, target_t:target_t+1]
-
-            logits_flat = new_logits.reshape(-1, new_logits.size(-1))
-            y_flat = y_target_t.reshape(-1).long()
-
-            L_state_t = self.MSELoss(new_Z_pred, Z_target_t)
-            L_ce_t = self.CrossEntropyLoss(logits_flat, y_flat)
-
-            autoreg_losses.append(L_state_t + self.lam_CE * L_ce_t)
-            autoreg_ce_losses.append(L_ce_t)
-
-            # Tilføj modellens egne autoregressive forudsigelser til historikken
-            Z_history = torch.cat([Z_history, new_Z_pred], dim=1)
-            Ret_history = torch.cat([Ret_history, new_Ret], dim=1)
-
-        #L_sigreg = self.SIGRegLoss(Z.permute(1, 0, 2))
-        L_state_loss = torch.stack(autoreg_losses).mean()
-        val_loss_autoreg = L_state_loss #+ self.lam_SIGReg * L_sigreg
-        val_ce_autoreg = torch.stack(autoreg_ce_losses).mean()
-
-        self.log('val_loss', val_loss_autoreg, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_state_loss', L_state_loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_ce_loss', val_ce_autoreg, on_step=False, on_epoch=True)
-        #self.log('val_sigreg_loss', L_sigreg, on_step=False, on_epoch=True)
 
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=self.lr)
         total_steps = self.trainer.estimated_stepping_batches
-        num_warmup_steps = int(total_steps * 0.1) 
+        num_warmup_steps = self.warmup / self.epochs * total_steps
         
         scheduler = get_cosine_schedule_with_warmup(
             optimizer=optimizer,
@@ -213,87 +228,3 @@ class JEPA(L.LightningModule):
             }
         }
     
-
-if __name__ == '__main__':
-    CONTINUE = True
-
-    import wandb
-    from omegaconf import OmegaConf
-    from lightning.pytorch.loggers import WandbLogger
-    from torch.utils.data import DataLoader
-    from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
-    from dotenv import load_dotenv
-
-    from data import CryptoDataset
-    from util import set_logger
-
-    load_dotenv()
-    wandb.login()
-
-    cfg = OmegaConf.load('./config.yaml')
-    checkpoint_path = f"./models/jepa/{cfg['jepa']['name']}/last.ckpt"
-
-    logger = set_logger(cfg)
-    logger.info('Starting JEPA training')
-
-    train_dataset = CryptoDataset(cfg, mode = 'training')
-    val_dataset = CryptoDataset(cfg, mode = 'validation')
-
-    train_loader = DataLoader(train_dataset, 
-                              batch_size = cfg['jepa']['training']['batch_size'],
-                              shuffle = True,
-                              num_workers = 3)
-    val_loader = DataLoader(val_dataset, 
-                              batch_size = cfg['jepa']['training']['batch_size'],
-                              shuffle = False,
-                              num_workers = 3)
-    
-    # 1. Initialiser ALTID modellen normalt. 
-    # Vægtene bliver alligevel overskrevet af trainer.fit() om et øjeblik.
-    model = JEPA(cfg)
-
-    if CONTINUE:
-        # Tving ALLEREDE HER alle interne torch.load kald (inkl. i PL) til at acceptere OmegaConf
-        original_load = torch.load
-        torch.load = lambda *args, **kwargs: original_load(*args, **{**kwargs, 'weights_only': False})
-
-        wandb_logger = WandbLogger(
-            entity='rudyhuy',
-            project='jepa',
-            name=cfg['jepa']['name'],
-            id='yf3e2m64',    
-            resume='must'          
-        )
-        # Sæt stien så Trainer ved, den skal genoptage hele træningstilstanden
-        fit_ckpt_path = checkpoint_path
-    else:
-        wandb_logger = WandbLogger(
-            entity='rudyhuy',
-            project='jepa',
-            name=cfg['jepa']['name'],
-        )    
-        fit_ckpt_path = None
-
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=f"./models/jepa/{cfg['jepa']['name']}/", 
-        filename="jepa",
-        monitor="val_loss",
-        mode="min",
-        save_top_k=1,
-        save_last=True
-    )
-
-    lr_monitor = LearningRateMonitor(logging_interval='step')
-
-    trainer = L.Trainer(
-        max_epochs = cfg['jepa']['training']['epochs'],
-        accelerator = "auto", 
-        devices = "auto",
-        gradient_clip_val = 1.0,
-        logger = wandb_logger,
-        callbacks = [checkpoint_callback, lr_monitor],
-        log_every_n_steps = cfg['jepa']['training']['log_every_n_steps']
-    )
-
-    # 2. Send din betingede fit_ckpt_path med her
-    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader, ckpt_path=fit_ckpt_path)

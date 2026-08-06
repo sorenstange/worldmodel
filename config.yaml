@@ -3,26 +3,32 @@ experiment_name: worldmodel
 data:
   symbols:
     - 'BTCUSDT'
-    - 'ETHUSDT'
-    - 'SOLUSDT'
-    - 'XRPUSDT'
-    - 'HYPEUSDT'
-    - 'SUIUSDT'
-    - 'BNBUSDT'
-    - 'ZECUSDT'
-    - 'LINKUSDT'
-    - 'AAVEUSDT'
-    - 'WLDUSDT'
-    - 'ONDOUSDT'
-    - 'XLMUSDT'
+    #- 'ETHUSDT'
+    #- 'SOLUSDT'
+    #- 'XRPUSDT'
+    #- 'HYPEUSDT'
+    #- 'SUIUSDT'
+    #- 'BNBUSDT'
+    #- 'ZECUSDT'
+    #- 'LINKUSDT'
+    #- 'AAVEUSDT'
+    #- 'WLDUSDT'
+    #- 'ONDOUSDT'
+    #- 'XLMUSDT'
   timeframe: '1m'
+  normalization_window: 1440
+  window_size: 15
   sequence_length: 64
   stride: 32
-  window_size: 15
-  num_bins: 61
-  extreme_value: 0.03
-  sigma: 0.2
-  normalization_window: 1440
+  returns:
+    num_bins: 61
+    min_value: -0.03
+    max_value: 0.03
+  actions:
+    num_bins: 51
+    min_value: -1.0
+    max_value: 1.0
+    commission_value: 0.0005
   training_interval: 
     - '2018-01-01 00:00'
     - '2025-01-01 00:00'
@@ -34,49 +40,32 @@ data:
     - '2026-06-01 00:00'
 
 jepa:
-  name: 'jepa-v2'
+  name: 'jepa-v3'
   input_dim: 6 # [Open, High, Low, Close, Volume, Volatility]
   d_model: 64
   encoder:
     num_layers: 24
     num_heads: 8
-    max_len: 16
+    max_len: ${eval:'${data.window_size} + 1'}
     dropout: 0.1
   predictor:
     num_layers: 48
     num_heads: 16
-    max_len: 64
-    num_bins: 61
+    max_len: ${data.sequence_length}
     dropout: 0.1
-  lam_SIGReg: 0.1
-  lam_CE: 1.0
-  lr: 0.0003
+  return_head:
+    num_bins: ${data.returns.num_bins}
+    min_value: ${data.returns.min_value}
+    max_value: ${data.returns.max_value}
+    dropout: 0.1
+  action_head:
+    num_bins: ${data.actions.num_bins}
+    min_value: ${data.actions.min_value}
+    max_value: ${data.actions.max_value}
+    dropout: 0.1
   training:
-    epochs: 1000
+    lr: 0.0003
+    warmup: 100
+    epochs: 3000
     batch_size: 128
     log_every_n_steps: 10
-
-actorcritic:
-  name: 'autotrader-v1'
-  action_bins: 201
-  num_layers: 16
-  num_heads: 8
-  max_len: 64
-  dropout: 0.1
-  start_temperature: 1.4
-  min_temperature: 0.4
-  temperature_decay: 0.99
-  lr: 0.0003
-  gamma: 0.99 # Diskounteringsfaktor
-  gae_lambda: 0.95 # Generalized Advantage Estimation
-  ppo_clip: 0.2 # PPO clipping interval (epsilon)
-  ent_coef: 0.01 # Entropi-vægt (sikrer udforskning)
-  vf_coef: 0.5 # Critic loss vægt
-  ppo_epochs: 4 # Hvor mange gange vi genbruger drømme-data
-  dream_horizon: 15 # Hvor langt frem vi drømmer
-  commission_value: 0.0005
-  training:
-    epochs: 5000
-    batch_size: 8
-    log_every_n_steps: 10
-
