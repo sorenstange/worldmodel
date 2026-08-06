@@ -37,7 +37,7 @@ class JEPA(L.LightningModule):
             nn.Dropout(cfg['jepa']['return_head']['dropout']),         
             nn.Linear(2*cfg['jepa']['d_model'], cfg['jepa']['return_head']['num_bins'])
         )
-        self.register_buffer("return_edges", 
+        self.register_buffer('return_bins', 
                             torch.linspace(
                                 cfg['jepa']['return_head']['min_value'], 
                                 cfg['jepa']['return_head']['max_value'], 
@@ -52,7 +52,7 @@ class JEPA(L.LightningModule):
             nn.Dropout(cfg['jepa']['action_head']['dropout']),         
             nn.Linear(2*cfg['jepa']['d_model'], cfg['jepa']['action_head']['num_bins'])
         )
-        self.register_buffer("action_edges", 
+        self.register_buffer('action_edges', 
                             torch.linspace(
                                 cfg['jepa']['action_head']['min_value'], 
                                 cfg['jepa']['action_head']['max_value'], 
@@ -161,53 +161,70 @@ class JEPA(L.LightningModule):
         self.log('val/action_loss', L_act, on_step=False, on_epoch=True, prog_bar=True)
         self.log('val/loss', L, on_step=False, on_epoch=True, prog_bar=True)
 
-    def imagine(self, Z_history, Ret_history, horizon = 15, temperature = 1.0):
-        if Ret_history.dim() == 2:
-            Ret_history = Ret_history.unsqueeze(-1) # Form: [B, T_historisk, 1]
-        bin_centers = (self.bin_edges[:-1] + self.bin_edges[1:]) / 2.0
+    def imagine(self, Z_prompt, Ret_prompt, Act_prompt, 
+                horizon = 15, 
+                ret_temperature = 1.0,
+                act_temperature = 1.0):
 
         dream_states = []
-        dream_logits = []
-        dream_ret = []
-        dream_sampled_idx = []
-        dream_actions = []
+        dream_ret, dream_ret_probs, dream_ret_sampled_idx = [], [], []
+        dream_act, dream_act_probs, dream_act_sampled_idx = [], [], []
 
-        if Z_history.size(1) >= self.max_len:
-            Z_history = Z_history[:, -self.max_len:, :]
+        if Z_history.size(1) >= self.predictor.max_len:
+            Z_prompt = Z_prompt[:, -self.predictor.max_len:, :]
 
-        if Ret_history.size(1) >= self.max_len:
-            Ret_history = Ret_history[:, -self.max_len:, :]
+        if Ret_history.size(1) >= self.predictor.max_len:
+            Ret_prompt = Ret_prompt[:, -self.predictor.max_len:, :]
+
+        if Act_prompt.size(1) >= self.predictor.max_len:
+            Act_prompt = Act_prompt[:, -self.predictor.max_len:, :]
 
         for t in range(horizon):
-            Z_next_pred, logits, action = self.predict(Z_history, Ret_history)
+            Z_next, ret_logits, act_logits = self.predict(Z_prompt, Ret_prompt, Act_prompt)
 
-            new_Z_pred = Z_next_pred[:, -1:, :]
-            new_logits = logits[:, -1:, :] # Form: [B, 1, num_bins]
+            new_Z = Z_next[:, -1:, :]
+            ret_logits = ret_logits[:, -1:, :] 
+            act_logits = act_logits[:, -1:, :]
 
-            scaled_logits_t = new_logits.squeeze(0).squeeze(0) / temperature
-            probs_t = torch.softmax(scaled_logits_t, dim=-1)
+            ret_logits = ret_logits.squeeze(0).squeeze(0) / ret_temperature
+            ret_probs = torch.softmax(ret_logits, dim=-1)
+            ret_sampled_idx = torch.multinomial(ret_probs, num_samples=1)
+            new_ret = self.return_bins[sampled_idx].unsqueeze(0).unsqueeze(0)
 
-            sampled_idx = torch.multinomial(probs_t, num_samples=1) # [1]
-            new_ret = bin_centers[sampled_idx].unsqueeze(0).unsqueeze(0) # [1, 1, 1]
+            act_logits = act_logits.squeeze(0).squeeze(0) / act_temperature
+            act_probs = torch.softmax(act_logits, dim=-1)
+            act_sampled_idx = torch.multinomial(act_probs, num_samples=1)
+            new_act = self.action_bins[sampled_idx].unsqueeze(0).unsqueeze(0)
 
-            Z_history = torch.cat([Z_history, new_Z_pred], dim=1)
-            Ret_history = torch.cat([Ret_history, new_ret], dim=1)
+            Z_prompt = torch.cat([Z_prompt, new_Z], dim=1)
+            Ret_prompt = torch.cat([Ret_prompt, new_ret], dim=1)
+            Act_prompt = torch.cat([Act_prompt, new_act], dim=1)
 
-            if Z_history.size(1) >= self.max_len:
-                Z_history = Z_history[:, -self.max_len:, :]
+            if Z_history.size(1) >= self.predictor.max_len:
+                Z_history = Z_history[:, -self.predictor.max_len:, :]
+            if Ret_history.size(1) >= self.predictor.max_len:
+                Ret_history = Ret_history[:, -self.predictor.max_len:, :]
+            if Act_prompt.size(1) >= self.predictor.max_len:
+                Act_prompt = Act_prompt[:, -self.predictor.max_len:, :]
 
-            if Ret_history.size(1) >= self.max_len:
-                Ret_history = Ret_history[:, -self.max_len:, :]
-
-            dream_states.append(new_Z_pred)
-            dream_logits.append(scaled_logits_t.unsqueeze(0).unsqueeze(0))
+            dream_states.append(new_Z)
             dream_ret.append(new_ret)
-            dream_sampled_idx.append(sampled_idx)
-            dream_actions.append(action)
+            dream_ret_probs.append(ret_probs.unsqueeze(0).unsqueeze(0))
+            dream_ret_sampled_idx.append(ret_sampled_idx.unsqueeze(0).unsqueeze(0))
+            dream_act.append(new_act)
+            dream_act_probs.append(act_probs.unsqueeze(0).unsqueeze(0))
+            dream_act_sampled_idx.append(act_sampled_idx.unsqueeze(0).unsqueeze(0))
 
-        return torch.concatenate(dream_states, dim = 1), torch.concatenate(dream_logits, dim = 1), torch.concatenate(dream_ret, dim = 1), torch.concatenate(dream_actions, dim = 1)
-
-
+        return (
+            torch.concatenate(dream_states, dim=1),
+            torch.concatenate(dream_ret, dim=1),
+            torch.concatenate(dream_ret_probs, dim=1),
+            torch.concatenate(dream_ret_sampled_idx, dim=1),
+            torch.concatenate(dream_act, dim=1),
+            torch.concatenate(dream_act_probs, dim=1),
+            torch.concatenate(dream_act_sampled_idx, dim=1)
+        )
+        
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=self.lr)
         total_steps = self.trainer.estimated_stepping_batches

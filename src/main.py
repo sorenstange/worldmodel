@@ -1,3 +1,4 @@
+import lightning as L
 import wandb
 from omegaconf import OmegaConf
 from lightning.pytorch.loggers import WandbLogger
@@ -38,6 +39,7 @@ if __name__ == '__main__':
                               num_workers = 3)
 
     model = JEPA(cfg)
+    logger.info(f'Model architecture: {model}')
 
     if CONTINUE:
         original_load = torch.load

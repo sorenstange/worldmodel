@@ -37,4 +37,4 @@
 # -- end of LSF options --
 
 cd /zhome/d3/0/155487/worldmodel
-uv run src/jepa.py
+uv run src/main.py
