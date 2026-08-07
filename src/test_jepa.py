@@ -155,9 +155,10 @@ def backtest_output_wrapper(backtest_output):
     for b_item in backtest_output:
         b_output.append(b_item.detach().cpu().numpy())
 
-    (b_ret_probs, b_act, b_act_probs, b_act_idx) = b_output
+    (b_state, b_ret_probs, b_act, b_act_probs, b_act_idx) = b_output
 
     return {
+        'b_state' : b_state,
         'b_ret_probs' : b_ret_probs,
         'b_act' : b_act,
         'b_act_probs' : b_act_probs,

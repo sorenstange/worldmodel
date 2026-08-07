@@ -7,7 +7,7 @@ import lightning as L
 from transformers import get_cosine_schedule_with_warmup
 
 from modules import *
-from util import truncate
+from util import *
 
 class JEPA(L.LightningModule):
     def __init__(self, cfg):
@@ -67,6 +67,13 @@ class JEPA(L.LightningModule):
         self.lr = cfg['jepa']['training']['lr']
         self.epochs = cfg['jepa']['training']['epochs']
         self.warmup = cfg['jepa']['training']['warmup']
+
+        self.AR_lr = cfg['jepa']['ar_training']['lr']
+        self.AR_epochs = cfg['jepa']['ar_training']['epochs']
+        self.AR_warmup = cfg['jepa']['ar_training']['warmup']
+        self.AR_horizon = cfg['jepa']['ar_training']['horizon']
+        self.AR_action_temp = cfg['jepa']['ar_training']['action_temperature']
+        self.AR_com_val = cfg['jepa']['ar_training']['commission_value']
         
 
     def encode(self, X):
@@ -218,15 +225,16 @@ class JEPA(L.LightningModule):
             torch.concatenate(dream_act_sampled_idx, dim=1)
         )
 
-    def backtest(self, Z, Ret, horizon = 15, act_temperature = 1.0):
-        out_ret_probs, out_act, out_act_probs, out_act_sampled_idx = [], [], [], []
+    def backtest(self, Z, Ret, horizon = 15, act_temperature = 1.0, commission_value = 0.0005):
+        out_Z, out_ret_probs, out_act, out_act_probs, out_act_sampled_idx = [], [], [], [], []
 
         B, Seq, D = Z.shape
         start_idx = Seq - horizon - 1
 
         Z_prompt = Z[:, :start_idx+1, :]
         Ret_prompt = Ret[:, :start_idx+1, :]
-        Act_prompt = torch.zeros_like(Ret_prompt, device = Ret_prompt.device)
+        Act_prompt = optimal_allocation(Ret_prompt.squeeze(-1), commission_value)
+        Act_prompt = Act_prompt[:, 1:].unsqueeze(-1)
 
         Z_prompt = truncate(Z_prompt, self.predictor.max_len)
         Ret_prompt = truncate(Ret_prompt, self.predictor.max_len)
@@ -256,12 +264,14 @@ class JEPA(L.LightningModule):
             Ret_prompt = truncate(Ret_prompt, self.predictor.max_len)
             Act_prompt = truncate(Act_prompt, self.predictor.max_len)
 
+            out_Z.append(new_Z)
             out_ret_probs.append(ret_probs.unsqueeze(0).unsqueeze(0))
             out_act.append(new_act)
             out_act_probs.append(act_probs.unsqueeze(0).unsqueeze(0))
             out_act_sampled_idx.append(act_sampled_idx.unsqueeze(0).unsqueeze(0))
 
         return (
+            torch.concatenate(out_Z, dim=1),
             torch.concatenate(out_ret_probs, dim=1),
             torch.concatenate(out_act, dim=1),
             torch.concatenate(out_act_probs, dim=1),
@@ -287,4 +297,106 @@ class JEPA(L.LightningModule):
                 "frequency": 1
             }
         }
+
+class JEPA_AR(JEPA):
+    def training_step(self, batch, batch_idx):
+        X = batch['sample']
+        Ret, Ret_target = batch['return'], batch['return_target']
+        Act, Act_target = batch['action'], batch['action_target']
+
+        Z = self.encode(X)
+
+        Z_hat, ret_probs, _, act_probs, _ = self.backtest(
+            Z, Ret, horizon = self.AR_horizon, 
+            act_temperature = self.AR_action_temp, 
+            commission_value = self.AR_com_val)
+
+        Z_target = Z[:, -self.AR_horizon:, :]
+        ret_target = Ret_target[:, -self.AR_horizon:, :]
+        act_target = Act_target[:, -self.AR_horizon:, :]
+
+        L_state = self.MSELoss(Z_hat, Z_target)
+
+        ret_probs_flat = ret_probs.reshape(-1, ret_probs.size(-1))
+        ret_target_flat = ret_target.reshape(-1).long()
+        L_ret = self.CrossEntropyLoss(ret_probs_flat, ret_target_flat) 
+
+        act_probs_flat = act_probs.reshape(-1, act_probs.size(-1))
+        act_target_flat = act_target.reshape(-1).long()
+        L_act = self.CrossEntropyLoss(act_probs_flat, act_target_flat) 
+
+        L = L_state + L_ret + L_act
+
+        self.log('train/state_loss', L_state)
+        self.log('train/return_loss', L_ret)
+        self.log('train/action_loss', L_act)
+        self.log('train/loss', L)
+
+        return L
     
+    def validation_step(self, batch, batch_idx):
+        X = batch['sample']
+        Ret, Ret_target = batch['return'], batch['return_target']
+        Act, Act_target = batch['action'], batch['action_target']
+
+        Z = self.encode(X)
+
+        Z_hat, ret_probs, acts, act_probs, _ = self.backtest(
+            Z, Ret, horizon = self.AR_horizon, 
+            act_temperature = self.AR_action_temp, 
+            commission_value = self.AR_com_val)
+
+        Z_target = Z[:, -self.AR_horizon:, :]
+        ret_target = Ret_target[:, -self.AR_horizon:, :]
+        act_target = Act_target[:, -self.AR_horizon:, :]
+
+        L_state = self.MSELoss(Z_hat, Z_target)
+
+        ret_probs_flat = ret_probs.reshape(-1, ret_probs.size(-1))
+        ret_target_flat = ret_target.reshape(-1).long()
+        L_ret = self.CrossEntropyLoss(ret_probs_flat, ret_target_flat) 
+
+        act_probs_flat = act_probs.reshape(-1, act_probs.size(-1))
+        act_target_flat = act_target.reshape(-1).long()
+        L_act = self.CrossEntropyLoss(act_probs_flat, act_target_flat) 
+
+        L = L_state + L_ret + L_act
+
+        self.log('val/state_loss', L_state, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val/return_loss', L_ret, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val/action_loss', L_act, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val/loss', L, on_step=False, on_epoch=True, prog_bar=True)
+
+        B, seq, D = Z.shape
+        b_a = acts.detach()
+        act0 = torch.full((B, 1, 1), 0.0, dtype=b_a.dtype, device=b_a.device)
+        b_a = torch.cat((act0, b_a), dim=1).squeeze(-1)
+        _, E = equity(b_a, ret_target, commission_value)
+        E = torch.mean(E)
+        self.log('val/mean_equity', E, on_step=False, on_epoch=True, prog_bar=True)
+
+    def configure_optimizers(self):
+        optimizer = optim.AdamW(self.parameters(), lr=self.AR_lr)
+        total_steps = self.trainer.estimated_stepping_batches
+        num_warmup_steps = self.AR_warmup / self.AR_epochs * total_steps
+        
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer=optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=total_steps
+        )
+    
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1
+            }
+        }
+
+if __name__ == '__main__':
+    model = JEPA_AR.load_from_checkpoint('./models/jepa/jepa-actor/last.ckpt')
+    print(model)
+
+

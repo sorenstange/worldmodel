@@ -66,6 +66,15 @@ jepa:
   training:
     lr: 0.0003
     warmup: 100
-    epochs: 3000
+    epochs: 500
     batch_size: 128
     log_every_n_steps: 10
+  ar_training:
+    lr: 0.0003
+    horizon: 20
+    action_temperature: 1.0
+    commission_value: ${data.actions.commission_value}
+    warmup: 100
+    epochs: 500
+    batch_size: 128
+
