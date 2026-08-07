@@ -234,7 +234,7 @@ class JEPA(L.LightningModule):
         Z_prompt = Z[:, :start_idx+1, :]
         Ret_prompt = Ret[:, :start_idx+1, :]
         Act_prompt = optimal_allocation(Ret_prompt.squeeze(-1), commission_value)
-        Act_prompt = Act_prompt[:, 1:].unsqueeze(-1)
+        Act_prompt = Act_prompt[:, 1:].detach().unsqueeze(-1)
 
         Z_prompt = truncate(Z_prompt, self.predictor.max_len)
         Ret_prompt = truncate(Ret_prompt, self.predictor.max_len)

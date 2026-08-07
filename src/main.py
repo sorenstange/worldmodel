@@ -1,6 +1,7 @@
 import lightning as L
 import wandb
 import argparse
+import logging
 from omegaconf import OmegaConf
 from lightning.pytorch.loggers import WandbLogger
 from torch.utils.data import DataLoader
@@ -11,15 +12,11 @@ from jepa import JEPA, JEPA_AR
 from data import CryptoDataset
 from util import set_logger
 
-def pre_train():
+def pre_train(cfg):
     load_dotenv()
     wandb.login()
 
-    OmegaConf.register_new_resolver("eval", eval, replace=True)
-    cfg = OmegaConf.load('./config.yaml')
-    cfg = OmegaConf.to_container(cfg, resolve=True)
-
-    logger = set_logger(cfg)
+    logger = logging.getLogger(cfg['experiment_name'])
     logger.info('Starting JEPA training')
 
     train_dataset = CryptoDataset(cfg, mode = 'training')
@@ -66,15 +63,11 @@ def pre_train():
 
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
-def ar_train():
+def ar_train(cfg):
     load_dotenv()
     wandb.login()
 
-    OmegaConf.register_new_resolver("eval", eval, replace=True)
-    cfg = OmegaConf.load('./config.yaml')
-    cfg = OmegaConf.to_container(cfg, resolve=True)
-
-    logger = set_logger(cfg)
+    logger = logging.getLogger(cfg['experiment_name'])
     logger.info('Starting AR-JEPA training')
 
     train_dataset = CryptoDataset(cfg, mode = 'training')
@@ -123,6 +116,12 @@ def ar_train():
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
 def main():
+    OmegaConf.register_new_resolver("eval", eval, replace=True)
+    cfg = OmegaConf.load('./config.yaml')
+    cfg = OmegaConf.to_container(cfg, resolve=True)
+
+    logger = set_logger(cfg)
+
     parser = argparse.ArgumentParser(
         description="Simpel CLI til at skifte mellem pre-train og ar-train."
     )
@@ -135,10 +134,10 @@ def main():
     args = parser.parse_args()
 
     if args.mode == "pre-train":
-        pre_train()
+        pre_train(cfg)
 
     elif args.mode == "ar-train":
-        ar_train()
+        ar_train(cfg)
 
 
 if __name__ == "__main__":
