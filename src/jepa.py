@@ -7,6 +7,7 @@ import lightning as L
 from transformers import get_cosine_schedule_with_warmup
 
 from modules import *
+from util import truncate
 
 class JEPA(L.LightningModule):
     def __init__(self, cfg):
@@ -52,7 +53,7 @@ class JEPA(L.LightningModule):
             nn.Dropout(cfg['jepa']['action_head']['dropout']),         
             nn.Linear(2*cfg['jepa']['d_model'], cfg['jepa']['action_head']['num_bins'])
         )
-        self.register_buffer('action_edges', 
+        self.register_buffer('action_bins', 
                             torch.linspace(
                                 cfg['jepa']['action_head']['min_value'], 
                                 cfg['jepa']['action_head']['max_value'], 
@@ -161,7 +162,7 @@ class JEPA(L.LightningModule):
         self.log('val/action_loss', L_act, on_step=False, on_epoch=True, prog_bar=True)
         self.log('val/loss', L, on_step=False, on_epoch=True, prog_bar=True)
 
-    def imagine(self, Z_prompt, Ret_prompt, Act_prompt, 
+    def dream(self, Z_prompt, Ret_prompt, Act_prompt, 
                 horizon = 15, 
                 ret_temperature = 1.0,
                 act_temperature = 1.0):
@@ -170,14 +171,9 @@ class JEPA(L.LightningModule):
         dream_ret, dream_ret_probs, dream_ret_sampled_idx = [], [], []
         dream_act, dream_act_probs, dream_act_sampled_idx = [], [], []
 
-        if Z_history.size(1) >= self.predictor.max_len:
-            Z_prompt = Z_prompt[:, -self.predictor.max_len:, :]
-
-        if Ret_history.size(1) >= self.predictor.max_len:
-            Ret_prompt = Ret_prompt[:, -self.predictor.max_len:, :]
-
-        if Act_prompt.size(1) >= self.predictor.max_len:
-            Act_prompt = Act_prompt[:, -self.predictor.max_len:, :]
+        Z_prompt = truncate(Z_prompt, self.predictor.max_len)
+        Ret_prompt = truncate(Ret_prompt, self.predictor.max_len)
+        Act_prompt = truncate(Act_prompt, self.predictor.max_len)
 
         for t in range(horizon):
             Z_next, ret_logits, act_logits = self.predict(Z_prompt, Ret_prompt, Act_prompt)
@@ -189,23 +185,20 @@ class JEPA(L.LightningModule):
             ret_logits = ret_logits.squeeze(0).squeeze(0) / ret_temperature
             ret_probs = torch.softmax(ret_logits, dim=-1)
             ret_sampled_idx = torch.multinomial(ret_probs, num_samples=1)
-            new_ret = self.return_bins[sampled_idx].unsqueeze(0).unsqueeze(0)
+            new_ret = self.return_bins[ret_sampled_idx].unsqueeze(0).unsqueeze(0)
 
             act_logits = act_logits.squeeze(0).squeeze(0) / act_temperature
             act_probs = torch.softmax(act_logits, dim=-1)
             act_sampled_idx = torch.multinomial(act_probs, num_samples=1)
-            new_act = self.action_bins[sampled_idx].unsqueeze(0).unsqueeze(0)
+            new_act = self.action_bins[act_sampled_idx].unsqueeze(0).unsqueeze(0)
 
             Z_prompt = torch.cat([Z_prompt, new_Z], dim=1)
             Ret_prompt = torch.cat([Ret_prompt, new_ret], dim=1)
             Act_prompt = torch.cat([Act_prompt, new_act], dim=1)
 
-            if Z_history.size(1) >= self.predictor.max_len:
-                Z_history = Z_history[:, -self.predictor.max_len:, :]
-            if Ret_history.size(1) >= self.predictor.max_len:
-                Ret_history = Ret_history[:, -self.predictor.max_len:, :]
-            if Act_prompt.size(1) >= self.predictor.max_len:
-                Act_prompt = Act_prompt[:, -self.predictor.max_len:, :]
+            Z_prompt = truncate(Z_prompt, self.predictor.max_len)
+            Ret_prompt = truncate(Ret_prompt, self.predictor.max_len)
+            Act_prompt = truncate(Act_prompt, self.predictor.max_len)
 
             dream_states.append(new_Z)
             dream_ret.append(new_ret)
@@ -223,6 +216,56 @@ class JEPA(L.LightningModule):
             torch.concatenate(dream_act, dim=1),
             torch.concatenate(dream_act_probs, dim=1),
             torch.concatenate(dream_act_sampled_idx, dim=1)
+        )
+
+    def backtest(self, Z, Ret, horizon = 15, act_temperature = 1.0):
+        out_ret_probs, out_act, out_act_probs, out_act_sampled_idx = [], [], [], []
+
+        B, Seq, D = Z.shape
+        start_idx = Seq - horizon - 1
+
+        Z_prompt = Z[:, :start_idx+1, :]
+        Ret_prompt = Ret[:, :start_idx+1, :]
+        Act_prompt = torch.zeros_like(Ret_prompt, device = Ret_prompt.device)
+
+        Z_prompt = truncate(Z_prompt, self.predictor.max_len)
+        Ret_prompt = truncate(Ret_prompt, self.predictor.max_len)
+        Act_prompt = truncate(Act_prompt, self.predictor.max_len)
+
+        for t in range(horizon):
+            Z_next, ret_logits, act_logits = self.predict(Z_prompt, Ret_prompt, Act_prompt)
+
+            new_Z = Z_next[:, -1:, :]
+            ret_logits = ret_logits[:, -1:, :] 
+            act_logits = act_logits[:, -1:, :]
+
+            ret_logits = ret_logits.squeeze(0).squeeze(0)
+            ret_probs = torch.softmax(ret_logits, dim=-1)
+            new_ret = Ret[:, start_idx+t+1, :].unsqueeze(1)
+
+            act_logits = act_logits.squeeze(0).squeeze(0) / act_temperature
+            act_probs = torch.softmax(act_logits, dim=-1)
+            act_sampled_idx = torch.multinomial(act_probs, num_samples=1)
+            new_act = self.action_bins[act_sampled_idx].unsqueeze(0).unsqueeze(0)
+
+            Z_prompt = torch.cat([Z_prompt, new_Z], dim=1)
+            Ret_prompt = torch.cat([Ret_prompt, new_ret], dim=1)
+            Act_prompt = torch.cat([Act_prompt, new_act], dim=1)
+
+            Z_prompt = truncate(Z_prompt, self.predictor.max_len)
+            Ret_prompt = truncate(Ret_prompt, self.predictor.max_len)
+            Act_prompt = truncate(Act_prompt, self.predictor.max_len)
+
+            out_ret_probs.append(ret_probs.unsqueeze(0).unsqueeze(0))
+            out_act.append(new_act)
+            out_act_probs.append(act_probs.unsqueeze(0).unsqueeze(0))
+            out_act_sampled_idx.append(act_sampled_idx.unsqueeze(0).unsqueeze(0))
+
+        return (
+            torch.concatenate(out_ret_probs, dim=1),
+            torch.concatenate(out_act, dim=1),
+            torch.concatenate(out_act_probs, dim=1),
+            torch.concatenate(out_act_sampled_idx, dim=1)
         )
         
     def configure_optimizers(self):

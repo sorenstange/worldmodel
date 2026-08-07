@@ -8,6 +8,11 @@ def symlog(x):
 def symexp(x):
     return torch.sign(x) * (torch.exp(torch.abs(x)) - 1.0)
 
+def truncate(x, max_len):
+    if x.size(1) >= max_len:
+        x = x[:, -max_len:, :]
+    return x
+
 def set_logger(cfg):
     logger = logging.getLogger(cfg['experiment_name'])
     logger.setLevel(logging.INFO)
