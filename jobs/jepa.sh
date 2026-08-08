@@ -6,7 +6,7 @@
 #BSUB -R "select[gpu32gb]"
 
 ### -- set the job Name --
-#BSUB -J train_jepa
+#BSUB -J jepa
 
 ### -- ask for number of cores (default: 1) --
 #BSUB -n 4
@@ -37,4 +37,4 @@
 # -- end of LSF options --
 
 cd /zhome/d3/0/155487/worldmodel
-uv run src/main.py pre-train
+uv run src/main.py pre-train --resume

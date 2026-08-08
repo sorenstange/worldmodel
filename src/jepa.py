@@ -233,8 +233,7 @@ class JEPA(L.LightningModule):
 
         Z_prompt = Z[:, :start_idx+1, :]
         Ret_prompt = Ret[:, :start_idx+1, :]
-        Act_prompt = optimal_allocation(Ret_prompt.squeeze(-1), commission_value)
-        Act_prompt = Act_prompt[:, 1:].detach().unsqueeze(-1)
+        Act_prompt = torch.full((B, start_idx+1, 1), 0.0, dtype=Z_prompt.dtype, device=Z_prompt.device)
 
         Z_prompt = truncate(Z_prompt, self.predictor.max_len)
         Ret_prompt = truncate(Ret_prompt, self.predictor.max_len)
@@ -244,17 +243,17 @@ class JEPA(L.LightningModule):
             Z_next, ret_logits, act_logits = self.predict(Z_prompt, Ret_prompt, Act_prompt)
 
             new_Z = Z_next[:, -1:, :]
-            ret_logits = ret_logits[:, -1:, :] 
-            act_logits = act_logits[:, -1:, :]
+            ret_logits = ret_logits[:, -1:, :].squeeze(1)
+            act_logits = act_logits[:, -1:, :].squeeze(1)
 
-            ret_logits = ret_logits.squeeze(0).squeeze(0)
             ret_probs = torch.softmax(ret_logits, dim=-1)
-            new_ret = Ret[:, start_idx+t+1, :].unsqueeze(1)
+            new_ret = Ret[:, start_idx+t+1, :].unsqueeze(-1)
 
-            act_logits = act_logits.squeeze(0).squeeze(0) / act_temperature
+            act_logits = act_logits / act_temperature
             act_probs = torch.softmax(act_logits, dim=-1)
+
             act_sampled_idx = torch.multinomial(act_probs, num_samples=1)
-            new_act = self.action_bins[act_sampled_idx].unsqueeze(0).unsqueeze(0)
+            new_act = self.action_bins[act_sampled_idx].unsqueeze(-1)
 
             Z_prompt = torch.cat([Z_prompt, new_Z], dim=1)
             Ret_prompt = torch.cat([Ret_prompt, new_ret], dim=1)
@@ -300,6 +299,7 @@ class JEPA(L.LightningModule):
 
 class JEPA_AR(JEPA):
     def training_step(self, batch, batch_idx):
+        horizon = 5#self.AR_horizon
         X = batch['sample']
         Ret, Ret_target = batch['return'], batch['return_target']
         Act, Act_target = batch['action'], batch['action_target']
@@ -307,13 +307,13 @@ class JEPA_AR(JEPA):
         Z = self.encode(X)
 
         Z_hat, ret_probs, _, act_probs, _ = self.backtest(
-            Z, Ret, horizon = self.AR_horizon, 
+            Z, Ret, horizon = horizon, 
             act_temperature = self.AR_action_temp, 
             commission_value = self.AR_com_val)
 
-        Z_target = Z[:, -self.AR_horizon:, :]
-        ret_target = Ret_target[:, -self.AR_horizon:, :]
-        act_target = Act_target[:, -self.AR_horizon:, :]
+        Z_target = Z[:, -horizon:, :]
+        ret_target = Ret_target[:, -horizon:, :]
+        act_target = Act_target[:, -horizon:, :]
 
         L_state = self.MSELoss(Z_hat, Z_target)
 
@@ -335,6 +335,7 @@ class JEPA_AR(JEPA):
         return L
     
     def validation_step(self, batch, batch_idx):
+        horizon = 5#self.AR_horizon
         X = batch['sample']
         Ret, Ret_target = batch['return'], batch['return_target']
         Act, Act_target = batch['action'], batch['action_target']
@@ -342,13 +343,13 @@ class JEPA_AR(JEPA):
         Z = self.encode(X)
 
         Z_hat, ret_probs, acts, act_probs, _ = self.backtest(
-            Z, Ret, horizon = self.AR_horizon, 
+            Z, Ret, horizon = horizon, 
             act_temperature = self.AR_action_temp, 
             commission_value = self.AR_com_val)
 
-        Z_target = Z[:, -self.AR_horizon:, :]
-        ret_target = Ret_target[:, -self.AR_horizon:, :]
-        act_target = Act_target[:, -self.AR_horizon:, :]
+        Z_target = Z[:, -horizon:, :]
+        ret_target = Ret_target[:, -horizon:, :]
+        act_target = Act_target[:, -horizon:, :]
 
         L_state = self.MSELoss(Z_hat, Z_target)
 
@@ -371,7 +372,8 @@ class JEPA_AR(JEPA):
         b_a = acts.detach()
         act0 = torch.full((B, 1, 1), 0.0, dtype=b_a.dtype, device=b_a.device)
         b_a = torch.cat((act0, b_a), dim=1).squeeze(-1)
-        _, E = equity(b_a, ret_target, commission_value)
+        b_r = Ret[:, -horizon:, :].squeeze(-1)
+        _, E = equity(b_a, b_r, c=self.AR_com_val)
         E = torch.mean(E)
         self.log('val/mean_equity', E, on_step=False, on_epoch=True, prog_bar=True)
 

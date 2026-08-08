@@ -124,7 +124,7 @@ def plot_dream(t_steps, dplot_dict, cfg, i, figure_name):
     ax2.set_xticks(t_steps)
     ax2.yaxis.set_major_formatter(mtick.PercentFormatter(1.0, decimals=2)) 
     ax2.legend(fontsize=11, loc='upper left')
-    cbar = fig.colorbar(im1, ax=ax2, orientation='vertical', pad=0.02)
+    cbar = fig.colorbar(im1, ax=ax2, orientation='vertical', pad=0.005)
     cbar.set_label('Return probability', fontsize=11)
 
     # ax3 subplot
@@ -142,8 +142,8 @@ def plot_dream(t_steps, dplot_dict, cfg, i, figure_name):
     ax4.scatter(t_steps, dplot_dict['d_act_vals'], color='cyan', marker='x', s=55, linewidths=2, label='Dream action', zorder=6)
     ax4.yaxis.set_major_formatter(mtick.PercentFormatter(1.0, decimals=2)) 
     ax4.legend(fontsize=11, loc='upper left')
-    cbar = fig.colorbar(im2, ax=ax4, orientation='vertical', pad=0.02)
-    cbar.set_label('Temperature-scaled \naction probability', fontsize=11)
+    cbar = fig.colorbar(im2, ax=ax4, orientation='vertical', pad=0.005)
+    cbar.set_label('Action probability', fontsize=11)
 
     plt.tight_layout()
 
@@ -159,9 +159,9 @@ def backtest_output_wrapper(backtest_output):
 
     return {
         'b_state' : b_state,
-        'b_ret_probs' : b_ret_probs,
+        'b_ret_probs' : b_ret_probs.squeeze(),
         'b_act' : b_act,
-        'b_act_probs' : b_act_probs,
+        'b_act_probs' : b_act_probs.squeeze(),
         'b_act_idx' : b_act_idx
     }
 
@@ -213,7 +213,7 @@ def plot_backtest(t_steps, bplot_dict, cfg, i, figure_name):
     ax2.set_xticks(t_steps)
     ax2.yaxis.set_major_formatter(mtick.PercentFormatter(1.0, decimals=2)) 
     ax2.legend(fontsize=11, loc='upper left')
-    cbar = fig.colorbar(im1, ax=ax2, orientation='vertical', pad=0.02)
+    cbar = fig.colorbar(im1, ax=ax2, orientation='vertical', pad=0.005)
     cbar.set_label('Return probability', fontsize=11)
 
     # ax3 subplot
@@ -231,8 +231,8 @@ def plot_backtest(t_steps, bplot_dict, cfg, i, figure_name):
     ax4.scatter(t_steps, bplot_dict['b_act_vals'], color='cyan', marker='x', s=55, linewidths=2, label='Dream action', zorder=6)
     ax4.yaxis.set_major_formatter(mtick.PercentFormatter(1.0, decimals=2)) 
     ax4.legend(fontsize=11, loc='upper left')
-    cbar = fig.colorbar(im2, ax=ax4, orientation='vertical', pad=0.02)
-    cbar.set_label('Temperature-scaled \naction probability', fontsize=11)
+    cbar = fig.colorbar(im2, ax=ax4, orientation='vertical', pad=0.005)
+    cbar.set_label('Action probability', fontsize=11)
 
     plt.tight_layout()
 
@@ -241,8 +241,8 @@ def plot_backtest(t_steps, bplot_dict, cfg, i, figure_name):
 
 if __name__ == '__main__':
     ####### CONTROL PARAMETERS #######
-    batch_size = 10
-    horizon = 30
+    batch_size = 20
+    horizon = 32
     ret_temperature = 1.0 
     act_temperature = 1.0
     ##################################

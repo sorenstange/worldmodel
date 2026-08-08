@@ -2,6 +2,7 @@ import lightning as L
 import wandb
 import argparse
 import logging
+import os
 from omegaconf import OmegaConf
 from lightning.pytorch.loggers import WandbLogger
 from torch.utils.data import DataLoader
@@ -12,56 +13,85 @@ from jepa import JEPA, JEPA_AR
 from data import CryptoDataset
 from util import set_logger
 
-def pre_train(cfg):
+def pre_train(cfg, resume=False):
     load_dotenv()
     wandb.login()
 
     logger = logging.getLogger(cfg['experiment_name'])
     logger.info('Starting JEPA training')
 
-    train_dataset = CryptoDataset(cfg, mode = 'training')
-    val_dataset = CryptoDataset(cfg, mode = 'validation')
+    train_dataset = CryptoDataset(cfg, mode='training')
+    val_dataset = CryptoDataset(cfg, mode='validation')
 
-    train_loader = DataLoader(train_dataset, 
-                              batch_size = cfg['jepa']['training']['batch_size'],
-                              shuffle = True,
-                              num_workers = 3)
-    val_loader = DataLoader(val_dataset, 
-                              batch_size = cfg['jepa']['training']['batch_size'],
-                              shuffle = False,
-                              num_workers = 3)
-    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=cfg['jepa']['training']['batch_size'],
+        shuffle=True,
+        num_workers=3,
+        persistent_workers=True,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=cfg['jepa']['training']['batch_size'],
+        shuffle=False,
+        num_workers=3,
+        persistent_workers=True,
+    )
+
     model = JEPA(cfg)
     logger.info(f'Model architecture: {model}')
 
     wandb_logger = WandbLogger(
-            entity='rudyhuy',
-            project='jepa',
-            name=cfg['jepa']['name'],
-        )    
+        entity='rudyhuy',
+        project='jepa',
+        name=cfg['jepa']['name'],
+    )
+
+    checkpoint_dir = f"./models/jepa/{cfg['jepa']['name']}/"
 
     checkpoint_callback = ModelCheckpoint(
-        dirpath=f"./models/jepa/{cfg['jepa']['name']}/", 
+        dirpath=checkpoint_dir,
         filename="jepa",
         monitor="val/loss",
         mode="min",
         save_top_k=1,
-        save_last=True
+        save_last=True,
     )
 
     lr_monitor = LearningRateMonitor(logging_interval='step')
 
     trainer = L.Trainer(
-        max_epochs = cfg['jepa']['training']['epochs'],
-        accelerator = "auto", 
-        devices = "auto",
-        gradient_clip_val = 1.0,
-        logger = wandb_logger,
-        callbacks = [checkpoint_callback, lr_monitor],
-        log_every_n_steps = cfg['jepa']['training']['log_every_n_steps']
+        max_epochs=cfg['jepa']['training']['epochs'],
+        accelerator="auto",
+        devices="auto",
+        gradient_clip_val=1.0,
+        logger=wandb_logger,
+        callbacks=[checkpoint_callback, lr_monitor],
+        log_every_n_steps=cfg['jepa']['training']['log_every_n_steps'],
     )
 
-    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    # Resume from the last checkpoint if requested
+    ckpt_path = None
+
+    if resume:
+        ckpt_path = f"{checkpoint_dir}/last.ckpt"
+
+        if not os.path.exists(ckpt_path):
+            logger.warning(
+                f"Resume requested, but checkpoint does not exist: {ckpt_path}"
+            )
+            ckpt_path = None
+        else:
+            logger.info(f"Resuming training from: {ckpt_path}")
+
+    trainer.fit(
+        model,
+        train_dataloaders=train_loader,
+        val_dataloaders=val_loader,
+        ckpt_path=ckpt_path,
+    )
+
 
 def ar_train(cfg):
     load_dotenv()
@@ -104,7 +134,7 @@ def ar_train(cfg):
     lr_monitor = LearningRateMonitor(logging_interval='step')
 
     trainer = L.Trainer(
-        max_epochs = cfg['jepa']['training']['epochs'],
+        max_epochs = cfg['jepa']['ar_training']['epochs'],
         accelerator = "auto", 
         devices = "auto",
         gradient_clip_val = 1.0,
@@ -130,15 +160,19 @@ def main():
         choices=["pre-train", "ar-train"],
         help="Vælg 'pre-train' for initial træning eller 'ar-train' for post-træning.",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume training from the last checkpoint.",
+    )
 
     args = parser.parse_args()
 
     if args.mode == "pre-train":
-        pre_train(cfg)
+        pre_train(cfg, resume=args.resume)
 
     elif args.mode == "ar-train":
         ar_train(cfg)
-
 
 if __name__ == "__main__":
     main()

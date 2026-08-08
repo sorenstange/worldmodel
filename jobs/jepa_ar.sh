@@ -6,7 +6,7 @@
 #BSUB -R "select[gpu32gb]"
 
 ### -- set the job Name --
-#BSUB -J train_jepa
+#BSUB -J jepa_ar
 
 ### -- ask for number of cores (default: 1) --
 #BSUB -n 4
