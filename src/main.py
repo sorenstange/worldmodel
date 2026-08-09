@@ -61,6 +61,32 @@ def pre_train(cfg, resume=False):
 
     lr_monitor = LearningRateMonitor(logging_interval='step')
 
+    # Resume from the last checkpoint if requested
+    ckpt_path = None
+
+    if resume:
+        ckpt_path = f"{checkpoint_dir}last.ckpt"
+
+        if not os.path.exists(ckpt_path):
+            logger.warning(
+                f"Resume requested, but checkpoint does not exist: {ckpt_path}"
+            )
+            ckpt_path = None
+            wandb_logger = WandbLogger(
+                entity='rudyhuy',
+                project='jepa',
+                name=cfg['jepa']['name'],
+            )
+        else:
+            logger.info(f"Resuming training from: {ckpt_path}")
+            wandb_logger = WandbLogger(
+                entity='rudyhuy',
+                project='jepa',
+                name=cfg['jepa']['name'],
+                id='ze8315oy',
+                resume='must'
+            )
+
     trainer = L.Trainer(
         max_epochs=cfg['jepa']['training']['epochs'],
         accelerator="auto",
@@ -70,21 +96,7 @@ def pre_train(cfg, resume=False):
         callbacks=[checkpoint_callback, lr_monitor],
         log_every_n_steps=cfg['jepa']['training']['log_every_n_steps'],
     )
-
-    # Resume from the last checkpoint if requested
-    ckpt_path = None
-
-    if resume:
-        ckpt_path = f"{checkpoint_dir}/last.ckpt"
-
-        if not os.path.exists(ckpt_path):
-            logger.warning(
-                f"Resume requested, but checkpoint does not exist: {ckpt_path}"
-            )
-            ckpt_path = None
-        else:
-            logger.info(f"Resuming training from: {ckpt_path}")
-
+    
     trainer.fit(
         model,
         train_dataloaders=train_loader,
