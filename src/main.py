@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
 from dotenv import load_dotenv
 
-from jepa import JEPA, JEPA_AR
+from jepa import JEPA, JEPA_AR, JEPA_RL
 from data import CryptoDataset
 from util import set_logger
 
@@ -157,6 +157,58 @@ def ar_train(cfg):
 
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
+def rl_train(cfg):
+    load_dotenv()
+    wandb.login()
+
+    logger = logging.getLogger(cfg['experiment_name'])
+    logger.info('Starting RL-JEPA training')
+
+    train_dataset = CryptoDataset(cfg, mode = 'training')
+    val_dataset = CryptoDataset(cfg, mode = 'validation')
+
+    train_loader = DataLoader(train_dataset, 
+                              batch_size = 24,
+                              shuffle = True,
+                              num_workers = 3)
+    val_loader = DataLoader(val_dataset, 
+                              batch_size = 24,
+                              shuffle = False,
+                              num_workers = 3)
+
+    checkpoint_path = f'./models/jepa/{cfg['jepa']['name']}/last.ckpt'
+    model = JEPA_RL.load_from_checkpoint(checkpoint_path)
+    logger.info(f'Loaded model from: {checkpoint_path}')
+    logger.info(f'Model architecture: {model}')
+
+    wandb_logger = WandbLogger(
+            entity='rudyhuy',
+            project='jepa',
+            name=f'{cfg['jepa']['name']}-RL',
+        )    
+
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=f"./models/jepa/{cfg['jepa']['name']}/", 
+        filename="jepa-rl",
+        monitor="val/mean_equity",
+        mode="max",
+        save_top_k=1
+    )
+
+    lr_monitor = LearningRateMonitor(logging_interval='step')
+
+    trainer = L.Trainer(
+        max_epochs = 1000,
+        accelerator = "auto", 
+        devices = "auto",
+        gradient_clip_val = 1.0,
+        logger = wandb_logger,
+        callbacks = [checkpoint_callback, lr_monitor],
+        log_every_n_steps = 10
+    )
+
+    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+
 def main():
     OmegaConf.register_new_resolver("eval", eval, replace=True)
     cfg = OmegaConf.load('./config.yaml')
@@ -169,7 +221,7 @@ def main():
     )
     parser.add_argument(
         "mode",
-        choices=["pre-train", "ar-train"],
+        choices=["pre-train", "ar-train", 'rl-train'],
         help="Vælg 'pre-train' for initial træning eller 'ar-train' for post-træning.",
     )
     parser.add_argument(
@@ -185,6 +237,9 @@ def main():
 
     elif args.mode == "ar-train":
         ar_train(cfg)
+
+    elif args.mode == "rl-train":
+        rl_train(cfg)
 
 if __name__ == "__main__":
     main()

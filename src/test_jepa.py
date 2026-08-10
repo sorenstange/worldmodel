@@ -254,8 +254,9 @@ if __name__ == '__main__':
     cfg = OmegaConf.load('./config.yaml')
     cfg = OmegaConf.to_container(cfg, resolve=True)
     logger = set_logger(cfg)    
+    logger.info('Starting JEPA-test pipeline')
 
-    model = JEPA.load_from_checkpoint(f'./models/jepa/{cfg['jepa']['name']}/last.ckpt', cfg=cfg, weights_only=False)
+    model = JEPA.load_from_checkpoint(f'./models/jepa/{cfg['jepa']['name']}/last.ckpt')
     model.eval()
 
     test_dataset = CryptoDataset(cfg, mode='test')
@@ -279,8 +280,10 @@ if __name__ == '__main__':
 
     Z_prompt = Z_true[:, :start_idx+1, :]
     Ret_prompt = batch['t_ret'][:, :start_idx+1, :]
-    Act_prompt = optimal_allocation(Ret_prompt.squeeze(-1), c = 0.0005, loss_fn = loss_fn) 
-    Act_prompt = Act_prompt[:, 1:].unsqueeze(-1)
+    #Act_prompt = optimal_allocation(Ret_prompt.squeeze(-1), c = 0.0005, loss_fn = loss_fn) 
+    #Act_prompt = Act_prompt[:, 1:].unsqueeze(-1)
+    Act_prompt = torch.zeros_like(Ret_prompt, device = Ret_prompt.device)
+
 
     with torch.no_grad():
         dream_output = model.dream( Z_prompt, Ret_prompt, Act_prompt, 
@@ -306,6 +309,7 @@ if __name__ == '__main__':
     folder = './figs/backtest'
     plot_name = '/backtest'
     os.makedirs(folder, exist_ok = True)
+    loss_fn = make_constrained_loss(loss_fn_so)    
     
     end_equity = []
 
@@ -318,8 +322,12 @@ if __name__ == '__main__':
         t_steps = np.arange(1, horizon + 1)
         f_dict = future_data_wrapper(batch, Z_true, start_idx)
 
+        Act_prompt = optimal_allocation(batch['t_ret'][:, :start_idx+1, :].squeeze(-1), c = 0.0005, loss_fn = loss_fn) 
+        Act_prompt = Act_prompt[:, 1:].unsqueeze(-1).detach()
+
         with torch.no_grad():
-            backtest_output = model.backtest(Z_true, batch['t_ret'], horizon = horizon, act_temperature = 1.0)
+            backtest_output = model.backtest(Z_true, batch['t_ret'], 
+            Act_prompt = Act_prompt, horizon = horizon, act_temperature = 1.0)
 
         b_dict = backtest_output_wrapper(backtest_output)
         bplot_dict = b_dict | f_dict
