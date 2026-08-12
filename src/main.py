@@ -3,25 +3,28 @@ import wandb
 import argparse
 import logging
 import os
+import json
+
 from omegaconf import OmegaConf
 from lightning.pytorch.loggers import WandbLogger
 from torch.utils.data import DataLoader
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
 from dotenv import load_dotenv
 
-from jepa import JEPA, JEPA_AR, JEPA_RL
+from jepa import JEPA
+from actor import Actor
 from data import CryptoDataset
 from util import set_logger
 
-def pre_train(cfg, resume=False):
+def train_jepa(cfg, resume=False):
     load_dotenv()
     wandb.login()
 
     logger = logging.getLogger(cfg['experiment_name'])
     logger.info('Starting JEPA training')
 
-    train_dataset = CryptoDataset(cfg, mode='training')
-    val_dataset = CryptoDataset(cfg, mode='validation')
+    train_dataset = CryptoDataset(cfg, mode='training', make_action=False)
+    val_dataset = CryptoDataset(cfg, mode='validation', make_action=False)
 
     train_loader = DataLoader(
         train_dataset,
@@ -42,17 +45,11 @@ def pre_train(cfg, resume=False):
     model = JEPA(cfg)
     logger.info(f'Model architecture: {model}')
 
-    wandb_logger = WandbLogger(
-        entity='rudyhuy',
-        project='jepa',
-        name=cfg['jepa']['name'],
-    )
-
-    checkpoint_dir = f"./models/jepa/{cfg['jepa']['name']}/"
+    checkpoint_dir = f"./models/{cfg['jepa']['name']}"
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_dir,
-        filename="jepa",
+        filename="best",
         monitor="val/loss",
         mode="min",
         save_top_k=1,
@@ -61,11 +58,9 @@ def pre_train(cfg, resume=False):
 
     lr_monitor = LearningRateMonitor(logging_interval='step')
 
-    # Resume from the last checkpoint if requested
     ckpt_path = None
-
     if resume:
-        ckpt_path = f"{checkpoint_dir}last.ckpt"
+        ckpt_path = f"{checkpoint_dir}/last.ckpt"
 
         if not os.path.exists(ckpt_path):
             logger.warning(
@@ -83,7 +78,7 @@ def pre_train(cfg, resume=False):
                 entity='rudyhuy',
                 project='jepa',
                 name=cfg['jepa']['name'],
-                id='ze8315oy',
+                id='81bnjzdm',
                 resume='must'
             )
 
@@ -104,110 +99,91 @@ def pre_train(cfg, resume=False):
         ckpt_path=ckpt_path,
     )
 
-
-def ar_train(cfg):
+def train_actor(cfg, resume=False):
     load_dotenv()
     wandb.login()
 
     logger = logging.getLogger(cfg['experiment_name'])
-    logger.info('Starting AR-JEPA training')
+    logger.info('Starting Actor training')
 
-    train_dataset = CryptoDataset(cfg, mode = 'training')
-    val_dataset = CryptoDataset(cfg, mode = 'validation')
+    train_dataset = CryptoDataset(cfg, mode='training', make_action=True)
+    val_dataset = CryptoDataset(cfg, mode='validation', make_action=True)
 
-    train_loader = DataLoader(train_dataset, 
-                              batch_size = cfg['jepa']['ar_training']['batch_size'],
-                              shuffle = True,
-                              num_workers = 3)
-    val_loader = DataLoader(val_dataset, 
-                              batch_size = cfg['jepa']['ar_training']['batch_size'],
-                              shuffle = False,
-                              num_workers = 3)
+    jepa = JEPA.load_from_checkpoint(f'./models/{cfg['jepa']['name']}/best.ckpt')
 
-    checkpoint_path = f'./models/jepa/{cfg['jepa']['name']}/last.ckpt'
-    model = JEPA_AR.load_from_checkpoint(checkpoint_path)
-    logger.info(f'Loaded model from: {checkpoint_path}')
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=cfg['actor']['training']['batch_size'],
+        shuffle=True,
+        num_workers=3,
+        persistent_workers=True,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=cfg['actor']['training']['batch_size'],
+        shuffle=False,
+        num_workers=3,
+        persistent_workers=True,
+    )
+
+    model = Actor(cfg, jepa)
     logger.info(f'Model architecture: {model}')
 
-    wandb_logger = WandbLogger(
-            entity='rudyhuy',
-            project='jepa',
-            name=f'{cfg['jepa']['name']}-AR',
-        )    
+    checkpoint_dir = f"./models/{cfg['actor']['name']}"
 
     checkpoint_callback = ModelCheckpoint(
-        dirpath=f"./models/jepa/{cfg['jepa']['name']}/", 
-        filename="jepa-ar",
-        monitor="val/mean_equity",
-        mode="max",
-        save_top_k=1
+        dirpath=checkpoint_dir,
+        filename="best",
+        monitor="val/loss",
+        mode="min",
+        save_top_k=1,
+        save_last=True,
     )
 
     lr_monitor = LearningRateMonitor(logging_interval='step')
 
-    trainer = L.Trainer(
-        max_epochs = cfg['jepa']['ar_training']['epochs'],
-        accelerator = "auto", 
-        devices = "auto",
-        gradient_clip_val = 1.0,
-        logger = wandb_logger,
-        callbacks = [checkpoint_callback, lr_monitor],
-        log_every_n_steps = cfg['jepa']['training']['log_every_n_steps']
-    )
+    ckpt_path = None
+    if resume:
+        ckpt_path = f"{checkpoint_dir}/last.ckpt"
 
-    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
-
-def rl_train(cfg):
-    load_dotenv()
-    wandb.login()
-
-    logger = logging.getLogger(cfg['experiment_name'])
-    logger.info('Starting RL-JEPA training')
-
-    train_dataset = CryptoDataset(cfg, mode = 'training')
-    val_dataset = CryptoDataset(cfg, mode = 'validation')
-
-    train_loader = DataLoader(train_dataset, 
-                              batch_size = 24,
-                              shuffle = True,
-                              num_workers = 3)
-    val_loader = DataLoader(val_dataset, 
-                              batch_size = 24,
-                              shuffle = False,
-                              num_workers = 3)
-
-    checkpoint_path = f'./models/jepa/{cfg['jepa']['name']}/last.ckpt'
-    model = JEPA_RL.load_from_checkpoint(checkpoint_path)
-    logger.info(f'Loaded model from: {checkpoint_path}')
-    logger.info(f'Model architecture: {model}')
-
-    wandb_logger = WandbLogger(
-            entity='rudyhuy',
-            project='jepa',
-            name=f'{cfg['jepa']['name']}-RL',
-        )    
-
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=f"./models/jepa/{cfg['jepa']['name']}/", 
-        filename="jepa-rl",
-        monitor="val/mean_equity",
-        mode="max",
-        save_top_k=1
-    )
-
-    lr_monitor = LearningRateMonitor(logging_interval='step')
+        if not os.path.exists(ckpt_path):
+            logger.warning(
+                f"Resume requested, but checkpoint does not exist: {ckpt_path}"
+            )
+            ckpt_path = None
+            wandb_logger = WandbLogger(
+                entity='rudyhuy',
+                project='actor',
+                name=cfg['actor']['name'],
+            )
+        else:
+            logger.info(f"Resuming training from: {ckpt_path}")
+            wandb_logger = WandbLogger(
+                entity='rudyhuy',
+                project='actor',
+                name=cfg['actor']['name'],
+                id='81bnjzdm',
+                resume='must'
+            )
 
     trainer = L.Trainer(
-        max_epochs = 1000,
-        accelerator = "auto", 
-        devices = "auto",
-        gradient_clip_val = 1.0,
-        logger = wandb_logger,
-        callbacks = [checkpoint_callback, lr_monitor],
-        log_every_n_steps = 10
+        max_epochs=cfg['actor']['training']['epochs'],
+        accelerator="auto",
+        devices="auto",
+        gradient_clip_val=1.0,
+        logger=wandb_logger,
+        callbacks=[checkpoint_callback, lr_monitor],
+        log_every_n_steps=cfg['actor']['training']['log_every_n_steps'],
+    )
+    
+    trainer.fit(
+        model,
+        train_dataloaders=train_loader,
+        val_dataloaders=val_loader,
+        ckpt_path=ckpt_path,
     )
 
-    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
 def main():
     OmegaConf.register_new_resolver("eval", eval, replace=True)
@@ -221,8 +197,8 @@ def main():
     )
     parser.add_argument(
         "mode",
-        choices=["pre-train", "ar-train", 'rl-train'],
-        help="Vælg 'pre-train' for initial træning eller 'ar-train' for post-træning.",
+        choices=['jepa', 'actor'],
+        help="Choose 'jepa' for jepa training or 'actor' for actor training",
     )
     parser.add_argument(
         "--resume",
@@ -232,14 +208,12 @@ def main():
 
     args = parser.parse_args()
 
-    if args.mode == "pre-train":
-        pre_train(cfg, resume=args.resume)
+    if args.mode == 'jepa':
+        train_jepa(cfg, resume=args.resume)
 
-    elif args.mode == "ar-train":
-        ar_train(cfg)
+    elif args.mode == "actor":
+        train_actor(cfg, resume=args.resume)
 
-    elif args.mode == "rl-train":
-        rl_train(cfg)
 
 if __name__ == "__main__":
     main()

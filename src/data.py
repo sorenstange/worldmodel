@@ -13,7 +13,7 @@ from binance.enums import *
 from util import *
 
 class CryptoDataset(Dataset):
-    def __init__(self, cfg, mode='training'):
+    def __init__(self, cfg, mode='training', make_action = False):
         logger = logging.getLogger(cfg['experiment_name'])
         logger.info(f'Initializing CryptoDataset. Mode: {mode}.'
                     f' Window size: {cfg["data"]["window_size"]}'
@@ -60,13 +60,16 @@ class CryptoDataset(Dataset):
             cfg['data']['returns']['max_value'],
             cfg['data']['returns']['num_bins']
             )
-
-        self.actions, self.action_targets = preprocess_classes(
-            self.actions,
-            cfg['data']['actions']['min_value'],
-            cfg['data']['actions']['max_value'],
-            cfg['data']['actions']['num_bins']
-        )
+        if make_action:
+            self.actions, self.action_targets = preprocess_classes(
+                self.actions,
+                cfg['data']['actions']['min_value'],
+                cfg['data']['actions']['max_value'],
+                cfg['data']['actions']['num_bins']
+            )
+        else:
+            self.actions = None
+            self.action_targets = None
 
         logger.info(f"Dataset created! Mode: {mode}. Number of Sequences: {self.samples.size(0):,}")
 
@@ -74,13 +77,12 @@ class CryptoDataset(Dataset):
         return self.samples.size(0)
 
     def __getitem__(self, idx):
-        # Alle tre elementer returneres nu med matchende sekvens-dimensioner [Seq, D]
         return {
             'sample': self.samples[idx, :], 
             'return': self.returns[idx, :],
             'return_target': self.return_targets[idx, :],
-            'action': self.actions[idx, :],
-            'action_target': self.action_targets[idx, :],
+            'action': self.actions[idx, :] if self.actions is not None else [],
+            'action_target': self.action_targets[idx, :] if self.actions is not None else [],
         }
 
 

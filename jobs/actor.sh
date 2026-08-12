@@ -6,7 +6,7 @@
 #BSUB -R "select[gpu32gb]"
 
 ### -- set the job Name --
-#BSUB -J jepa_rl
+#BSUB -J actor_train
 
 ### -- ask for number of cores (default: 1) --
 #BSUB -n 4
@@ -31,10 +31,10 @@
 ### -- Specify the output and error file. %J is the job-id --
 ### -- -o and -e mean append, -oo and -eo mean overwrite --
 
-#BSUB -o /zhome/d3/0/155487/worldmodel/outputs/jepa/rl_%J.out
-#BSUB -e /zhome/d3/0/155487/worldmodel/outputs/jepa/rl_%J.err
+#BSUB -o /zhome/d3/0/155487/worldmodel/outputs/actor/train_%J.out
+#BSUB -e /zhome/d3/0/155487/worldmodel/outputs/actor/train_%J.err
 
 # -- end of LSF options --
 
 cd /zhome/d3/0/155487/worldmodel
-uv run src/main.py rl-train
+uv run src/main.py actor --resume

@@ -40,7 +40,7 @@ data:
     - '2026-06-01 00:00'
 
 jepa:
-  name: 'jepa-actor'
+  name: 'jepa'
   input_dim: 6 # [Open, High, Low, Close, Volume, Volatility]
   d_model: 64
   encoder:
@@ -58,6 +58,22 @@ jepa:
     min_value: ${data.returns.min_value}
     max_value: ${data.returns.max_value}
     dropout: 0.1
+  training:
+    lr: 0.0003
+    warmup: 100
+    epochs: 2000
+    batch_size: 200
+    log_every_n_steps: 10
+
+actor:
+  name: 'actor'
+  input_dim: ${jepa.d_model}
+  d_model: 64
+  backbone:
+    num_layers: 48
+    num_heads: 16
+    max_len: ${data.sequence_length}
+    dropout: 0.1
   action_head:
     num_bins: ${data.actions.num_bins}
     min_value: ${data.actions.min_value}
@@ -67,14 +83,6 @@ jepa:
     lr: 0.0003
     warmup: 100
     epochs: 2000
-    batch_size: 200
+    batch_size: 512
     log_every_n_steps: 10
-  ar_training:
-    lr: 0.0003
-    horizon: 5
-    action_temperature: 1.0
-    commission_value: ${data.actions.commission_value}
-    warmup: 100
-    epochs: 500
-    batch_size: 100
 

@@ -2,28 +2,26 @@ import torch
 import torch.nn as nn
 
 class Predictor(nn.Module):
-    def __init__(self, d_model, num_layers, num_heads, max_len, condition_dim = 2, dropout = 0.1):
+    def __init__(self, input_dim, d_model, num_layers, num_heads, max_len, condition_dim = 1, dropout = 0.1):
         super().__init__()
+        self.embedding = Embedding(input_dim, d_model)
         self.pe = PositionalEncoding(d_model, max_len)
         self.layers = nn.ModuleList([
-            TransformerPredictorLayer(d_model = d_model, 
-                                    num_heads = num_heads,
-                                    condition_dim = condition_dim,
-                                    dropout = dropout) 
-                                    for _ in range(num_layers)
-                                    ])
+            TransformerLayer_AdaLN(
+                d_model = d_model, 
+                num_heads = num_heads,
+                condition_dim = condition_dim,
+                dropout = dropout) 
+                for _ in range(num_layers)
+            ])
                                     
         self.max_len = max_len
 
-    def forward(self, x, ret, act):
+    def forward(self, x, cond):
         if x.dim() == 2:
             x = x.unsqueeze(0)
-        if ret.dim() == 2:
-            ret = ret.unsqueeze(-1)
-        if act.dim() == 2:
+        if cond.dim() == 2:
             ret = act.unsqueeze(-1)
-
-        cond = torch.cat([ret, act], dim=-1)
         
         _, seq_len, _ = x.shape
 
@@ -46,16 +44,17 @@ class Encoder(nn.Module):
     def __init__(self, input_dim, d_model, num_layers, num_heads, max_len, dropout = 0.1):
         super().__init__()
         self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model)) 
-
         self.embedding = Embedding(input_dim, d_model)
         self.pe = PositionalEncoding(d_model, max_len)
-        
         self.layers = nn.ModuleList([
-            TransformerEncoderLayer(d_model = d_model, 
-                                    num_heads = num_heads,
-                                    dropout = dropout) 
-                                    for _ in range(num_layers)
-                                    ])
+            TransformerLayer(
+                d_model = d_model, 
+                num_heads = num_heads,
+                dropout = dropout) 
+                for _ in range(num_layers)
+            ])
+        
+        self.max_len = max_len
 
     def forward(self, x):
         if x.dim() < 3:
@@ -74,7 +73,6 @@ class Encoder(nn.Module):
 
         return x
 
-
 class Embedding(nn.Module):
     def __init__(self, input_dim, d_model):
         super().__init__()
@@ -82,7 +80,6 @@ class Embedding(nn.Module):
 
     def forward(self, x):
         return self.projection(x)
-
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len):
@@ -109,9 +106,6 @@ class AdaLN(nn.Module):
         nn.init.zeros_(self.cond_to_scale_shift.bias)
 
     def forward(self, x, condition):
-        """
-        condition: [B, T, condition_dim] eller [B, condition_dim]
-        """
         normed_x = self.norm(x)
         
         if condition.dim() == 2:
@@ -183,7 +177,7 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-class TransformerPredictorLayer(nn.Module):
+class TransformerLayer_AdaLN(nn.Module):
     def __init__(self, d_model, num_heads, condition_dim, dropout=0.1):
         super().__init__()
 
@@ -214,7 +208,7 @@ class TransformerPredictorLayer(nn.Module):
 
         return x
 
-class TransformerEncoderLayer(nn.Module):
+class TransformerLayer(nn.Module):
     def __init__(self, d_model, num_heads, dropout=0.1):
         super().__init__()
 
