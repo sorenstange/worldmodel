@@ -21,7 +21,7 @@ class Predictor(nn.Module):
         if x.dim() == 2:
             x = x.unsqueeze(0)
         if cond.dim() == 2:
-            ret = act.unsqueeze(-1)
+            cond = cond.unsqueeze(-1)
         
         _, seq_len, _ = x.shape
 

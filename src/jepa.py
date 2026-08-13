@@ -104,7 +104,7 @@ class JEPA(L.LightningModule):
 
         self.log('train/state_loss', L_state)
         self.log('train/return_loss', L_ret)
-        self.log('train/loss', L)
+        self.log('train/jepa_loss', L)
 
         return L
 
@@ -132,7 +132,7 @@ class JEPA(L.LightningModule):
 
         self.log('val/state_loss', L_state, on_step=False, on_epoch=True, prog_bar=True)
         self.log('val/return_loss', L_ret, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val/loss', L, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val/jepa_loss', L, on_step=False, on_epoch=True, prog_bar=True)
 
     def dream(self, Z_prompt, Ret_prompt, horizon = 15, ret_temperature = 1.0):
         dream_states = []

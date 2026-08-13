@@ -50,10 +50,17 @@ def train_jepa(cfg, resume=False):
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_dir,
         filename="best",
-        monitor="val/loss",
+        monitor="val/jepa_loss",
         mode="min",
         save_top_k=1,
         save_last=True,
+    )
+
+    early_stopping = EarlyStopping(
+        monitor="val/jepa_loss",
+        mode="min",
+        patience=cfg['jepa']['training']['patience'],
+        min_delta=0.0,
     )
 
     lr_monitor = LearningRateMonitor(logging_interval='step')
@@ -69,14 +76,14 @@ def train_jepa(cfg, resume=False):
             ckpt_path = None
             wandb_logger = WandbLogger(
                 entity='rudyhuy',
-                project='jepa',
+                project=cfg['experiment_name'],
                 name=cfg['jepa']['name'],
             )
         else:
             logger.info(f"Resuming training from: {ckpt_path}")
             wandb_logger = WandbLogger(
                 entity='rudyhuy',
-                project='jepa',
+                project=cfg['experiment_name'],
                 name=cfg['jepa']['name'],
                 id='81bnjzdm',
                 resume='must'
@@ -88,7 +95,7 @@ def train_jepa(cfg, resume=False):
         devices="auto",
         gradient_clip_val=1.0,
         logger=wandb_logger,
-        callbacks=[checkpoint_callback, lr_monitor],
+        callbacks=[checkpoint_callback, lr_monitor, early_stopping],
         log_every_n_steps=cfg['jepa']['training']['log_every_n_steps'],
     )
     
@@ -135,10 +142,17 @@ def train_actor(cfg, resume=False):
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_dir,
         filename="best",
-        monitor="val/loss",
+        monitor="val/actor_loss",
         mode="min",
         save_top_k=1,
         save_last=True,
+    )
+
+    early_stopping = EarlyStopping(
+        monitor="val/actor_loss",
+        mode="min",
+        patience=cfg['actor']['training']['patience'],
+        min_delta=0.0,
     )
 
     lr_monitor = LearningRateMonitor(logging_interval='step')
@@ -154,14 +168,14 @@ def train_actor(cfg, resume=False):
             ckpt_path = None
             wandb_logger = WandbLogger(
                 entity='rudyhuy',
-                project='actor',
+                project=cfg['experiment_name'],
                 name=cfg['actor']['name'],
             )
         else:
             logger.info(f"Resuming training from: {ckpt_path}")
             wandb_logger = WandbLogger(
                 entity='rudyhuy',
-                project='actor',
+                project=cfg['experiment_name'],
                 name=cfg['actor']['name'],
                 id='81bnjzdm',
                 resume='must'
@@ -173,7 +187,7 @@ def train_actor(cfg, resume=False):
         devices="auto",
         gradient_clip_val=1.0,
         logger=wandb_logger,
-        callbacks=[checkpoint_callback, lr_monitor],
+        callbacks=[checkpoint_callback, lr_monitor, early_stopping],
         log_every_n_steps=cfg['actor']['training']['log_every_n_steps'],
     )
     

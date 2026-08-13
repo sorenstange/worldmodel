@@ -3,18 +3,18 @@ experiment_name: worldmodel
 data:
   symbols:
      - 'BTCUSDT'
-     - 'ETHUSDT'
-     - 'SOLUSDT'
-     - 'XRPUSDT'
-     - 'HYPEUSDT'
-     - 'SUIUSDT'
-     - 'BNBUSDT'
-     - 'ZECUSDT'
-     - 'LINKUSDT'
-     - 'AAVEUSDT'
-     - 'WLDUSDT'
-     - 'ONDOUSDT'
-     - 'XLMUSDT'
+    #  - 'ETHUSDT'
+    #  - 'SOLUSDT'
+    #  - 'XRPUSDT'
+    #  - 'HYPEUSDT'
+    #  - 'SUIUSDT'
+    #  - 'BNBUSDT'
+    #  - 'ZECUSDT'
+    #  - 'LINKUSDT'
+    #  - 'AAVEUSDT'
+    #  - 'WLDUSDT'
+    #  - 'ONDOUSDT'
+    #  - 'XLMUSDT'
   timeframe: '1m'
   normalization_window: 1440
   window_size: 15
@@ -40,7 +40,7 @@ data:
     - '2026-06-01 00:00'
 
 jepa:
-  name: 'jepa'
+  name: 'jepa-btc'
   input_dim: 6 # [Open, High, Low, Close, Volume, Volatility]
   d_model: 64
   encoder:
@@ -61,12 +61,13 @@ jepa:
   training:
     lr: 0.0003
     warmup: 100
-    epochs: 2000
+    epochs: 1000
     batch_size: 200
     log_every_n_steps: 10
+    patience: 10
 
 actor:
-  name: 'actor'
+  name: 'actor-btc'
   input_dim: ${jepa.d_model}
   d_model: 64
   backbone:
@@ -85,4 +86,5 @@ actor:
     epochs: 2000
     batch_size: 512
     log_every_n_steps: 10
+    patience: 10
 

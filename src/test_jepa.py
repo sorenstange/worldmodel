@@ -81,7 +81,7 @@ def plot_dream(t_steps, dplot_dict, cfg, i, figure_name):
 
     # ax2 subplot
     im1 = ax2.imshow(dplot_dict['d_ret_probs'][i, :].T, aspect='auto', cmap='viridis', origin='lower',
-                    extent=[0.5, horizon + 0.5, min_return, max_return])
+                    extent=[0.5, horizon + 0.5, min_return, max_return], vmin=0.0, vmax=1.0)
 
     ax2.scatter(t_steps, dplot_dict['t_ret_vals'][i, :], color='red', edgecolor='white', s=45, label='True return', zorder=5)
     ax2.scatter(t_steps, dplot_dict['d_ret_vals'][i, :], color='cyan', marker='x', s=55, linewidths=2, label='Dream return', zorder=6)
@@ -103,7 +103,7 @@ if __name__ == '__main__':
     ####### CONTROL PARAMETERS #######
     batch_size = 32
     horizon = 32
-    ret_temperature = 1.0 
+    ret_temperature = 1.0
     num_dream_plots = 20; D = 0
     ##################################
 
@@ -114,7 +114,7 @@ if __name__ == '__main__':
     logger = set_logger(cfg)    
     logger.info('Starting JEPA-test pipeline')
 
-    model = JEPA.load_from_checkpoint(f'./models/{cfg['jepa']['name']}/best.ckpt')
+    model = JEPA.load_from_checkpoint(f'./models/{cfg['jepa']['name']}/last.ckpt')
     model.eval()
 
     test_dataset = CryptoDataset(cfg, mode='test')
