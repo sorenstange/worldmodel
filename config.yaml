@@ -16,20 +16,29 @@ data:
      - 'ONDOUSDT'
      - 'XLMUSDT'
   timeframe: '1m'
-  normalization_window: 1440
-  window_size: 15
-  sequence_length: 64
-  stride: 32
+  normalization_window: 1440   # 1 day of 1m bars
+  vol_window_short: 60         # short leg of the vol-regime feature
+  window_size: 15              # 1m bars per window -> the model's timestep is 15m
+  sequence_length: 64          # windows per sequence -> 16h of context
+  stride: 32                   # training only: 50% overlap as augmentation
+  eval_stride: 64              # val/test: disjoint windows, no double counting
   returns:
+    # Units are SIGMA, not percent: the target is the window return divided by a
+    # causal realised-vol estimate. Raw percent is not comparable across symbols
+    # (SOL's 15m sigma is ~1.9x BTC's), which defeats multi-symbol training.
     num_bins: 61
-    min_value: -0.03
-    max_value: 0.03
+    min_value: -5.0
+    max_value: 5.0
   actions:
     num_bins: 51
     min_value: -1.0
     max_value: 1.0
-    commission_value: 0.0005
-  training_interval: 
+    commission_value: 0.0005   # 5 bps, charged on |change in allocation|
+    max_change: 0.1            # oracle turnover constraint, per 15m step
+    penalty_weight: 1000.0
+    opt_steps: 1000
+    opt_lr: 0.01
+  training_interval:
     - '2018-01-01 00:00'
     - '2025-01-01 00:00'
   validation_interval:
@@ -42,15 +51,25 @@ data:
 jepa:
   name: 'jepa'
   input_dim: 6 # [Open, High, Low, Close, Volume, Volatility]
-  d_model: 64
+  d_model: 256
+  # Loss weights.
+  lam_state: 1.0
+  lam_CE: 1.0
+  lam_SIGReg: 0.1     # anti-collapse; 0.0 reproduces the collapsing setup
+  lam_rollout: 0.5    # multi-step rollout term; 0.0 = pure teacher forcing
+  sigreg:
+    knots: 17
+    num_proj: 1024
   encoder:
-    num_layers: 24
-    num_heads: 8
+    num_layers: 6
+    num_heads: 8      # head_dim 32
+    ff_mult: 4
     max_len: ${eval:'${data.window_size} + 1'}
     dropout: 0.1
   predictor:
-    num_layers: 48
-    num_heads: 16
+    num_layers: 8
+    num_heads: 8      # head_dim 32
+    ff_mult: 4
     max_len: ${data.sequence_length}
     dropout: 0.1
   return_head:
@@ -60,19 +79,24 @@ jepa:
     dropout: 0.1
   training:
     lr: 0.0003
-    warmup: 100
-    epochs: 2000
-    batch_size: 200
+    weight_decay: 0.01
+    warmup_steps: 2000        # in STEPS, not epochs
+    sched_steps: null         # null -> derive from max_epochs x steps/epoch
+    epochs: 60                # keep patience < epochs or the cosine never decays
+    batch_size: 128
+    rollout_steps: 8          # horizon of the autoregressive term
+    rollout_batch: 32         # sub-batch for it; k passes are held for backprop
     log_every_n_steps: 10
-    patience: 100
+    patience: 10
 
 actor:
   name: 'actor'
   input_dim: ${jepa.d_model}
-  d_model: 64
+  d_model: 256
   backbone:
-    num_layers: 48
-    num_heads: 16
+    num_layers: 8
+    num_heads: 8
+    ff_mult: 4
     max_len: ${data.sequence_length}
     dropout: 0.1
   action_head:
@@ -80,17 +104,20 @@ actor:
     min_value: ${data.actions.min_value}
     max_value: ${data.actions.max_value}
     dropout: 0.1
+  ar:
+    ctx_len: 8         # 2h of real context before the policy takes over
+    pred_steps: 16     # each step is a sequential backbone pass held for backprop
+    batch_size: 32     # ...so this must be far below the teacher-forced batch
   training:
     lr: 0.0003
-    warmup: 500
-    epochs: 10000
-    batch_size: 512
+    weight_decay: 0.01
+    warmup_steps: 1000
+    sched_steps: null
+    epochs: 60
+    batch_size: 256
     log_every_n_steps: 10
-    patience: 500
+    patience: 10
   test:
     batch_size: 128
-    ctx_win: 16
     act_temp: 1.0
     num_plots: 20
-
-
