@@ -68,13 +68,6 @@ def plot_backtest(backtest_output, cfg, B, figure_name):
     plt.close()
 
 if __name__ == '__main__':
-    ####### CONTROL PARAMETERS #######
-    batch_size = 32
-    ctx_win = 10
-    act_temperature = 1.0
-    num_backtest_plots = 20; B = 0
-    ##################################
-
     # 0. INITIALIZATION
     OmegaConf.register_new_resolver("eval", eval, replace=True)
     cfg = OmegaConf.load('./config.yaml')
@@ -83,40 +76,46 @@ if __name__ == '__main__':
     logger.info('Starting Actor-test pipeline')
 
     jepa = JEPA.load_from_checkpoint(f'./models/{cfg['jepa']['name']}/best.ckpt', cfg=cfg)
-    model = Actor.load_from_checkpoint(f'./models/{cfg['actor']['name']}/best.ckpt', cfg=cfg, jepa=jepa)
+    model = Actor.load_from_checkpoint(f'./models/{cfg['actor']['name']}/last.ckpt', cfg=cfg, jepa=jepa)
     model.eval()
 
     if torch.cuda.is_available():
         model = model.cuda()
 
-    test_dataset = CryptoDataset(cfg, mode='training', make_action=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
+    test_dataset = CryptoDataset(cfg, mode='test', make_action=True)
+    test_loader = DataLoader(test_dataset, batch_size=cfg['actor']['test']['batch_size'], shuffle=True)
 
     folder = './figs/backtest'
     plot_name = '/backtest'
     os.makedirs(folder, exist_ok = True)
 
+    B = 0
     end_equity = []
+    t_end_equity = []
     for batch in test_loader:
         if torch.cuda.is_available():
             for key, item in batch.items():
                 batch[key] = item.cuda()
 
-        backtest_output = model.backtest(batch, ctx_win, act_temperature)
+        backtest_output = model.backtest(batch, cfg['actor']['test']['act_temp'])
         
         for key, item in backtest_output.items():
             backtest_output[key] = item.detach().cpu().numpy()
 
         end_equity.append(backtest_output['end_equity'])
+        t_end_equity.append(backtest_output['opt_end_equity'])
 
-        while B < num_backtest_plots:
+        while B < cfg['actor']['test']['num_plots']:
             figure_name = folder + plot_name + f'{B+1}.png'
             plot_backtest(backtest_output, cfg, B, figure_name)
             logger.info(f'Run {B+1}: End equity: {backtest_output['end_equity'][B]:.4f}')
             B += 1
 
     end_equity = np.concatenate(end_equity)
-    logger.info(f'Avg. End equity: {np.mean(end_equity):.4f}')
+    t_end_equity = np.concatenate(t_end_equity)
+    
+    logger.info(f'Avg. ROI: {100*(np.mean(end_equity)-1):.2f}%')
+    logger.info(f'Avg. (Optimal) ROI: {100*(np.mean(t_end_equity)-1):.2f}%')
     logger.info(f"Done! Backtest figures saved in '{folder}'")
         
 

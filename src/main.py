@@ -12,7 +12,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, Learning
 from dotenv import load_dotenv
 
 from jepa import JEPA
-from actor import Actor
+from actor import Actor, ActorAR
 from data import CryptoDataset
 from util import set_logger
 
@@ -88,6 +88,13 @@ def train_jepa(cfg, resume=False):
                 id='81bnjzdm',
                 resume='must'
             )
+    else:
+        ckpt_path = None
+        wandb_logger = WandbLogger(
+            entity='rudyhuy',
+            project=cfg['experiment_name'],
+            name=cfg['jepa']['name'],
+        )
 
     trainer = L.Trainer(
         max_epochs=cfg['jepa']['training']['epochs'],
@@ -142,8 +149,8 @@ def train_actor(cfg, resume=False):
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_dir,
         filename="best",
-        monitor="val/actor_loss",
-        mode="min",
+        monitor="val/mean_eq",
+        mode="max",
         save_top_k=1,
         save_last=True,
     )
@@ -180,6 +187,87 @@ def train_actor(cfg, resume=False):
                 id='81bnjzdm',
                 resume='must'
             )
+    else:
+        ckpt_path = None
+        wandb_logger = WandbLogger(
+            entity='rudyhuy',
+            project=cfg['experiment_name'],
+            name=cfg['actor']['name'],
+        )
+
+    trainer = L.Trainer(
+        max_epochs=cfg['actor']['training']['epochs'],
+        accelerator="auto",
+        devices="auto",
+        gradient_clip_val=1.0,
+        logger=wandb_logger,
+        callbacks=[checkpoint_callback, lr_monitor, early_stopping],
+        log_every_n_steps=cfg['actor']['training']['log_every_n_steps'],
+    )
+    
+    trainer.fit(
+        model,
+        train_dataloaders=train_loader,
+        val_dataloaders=val_loader,
+        ckpt_path=ckpt_path,
+    )
+
+def train_actor_ar(cfg):
+    load_dotenv()
+    wandb.login()
+
+    logger = logging.getLogger(cfg['experiment_name'])
+    logger.info('Starting Actor AR training')
+
+    train_dataset = CryptoDataset(cfg, mode='training', make_action=True)
+    val_dataset = CryptoDataset(cfg, mode='validation', make_action=True)
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=64,
+        shuffle=True,
+        num_workers=3,
+        persistent_workers=True,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=64,
+        shuffle=False,
+        num_workers=3,
+        persistent_workers=True,
+    )
+
+    jepa = JEPA.load_from_checkpoint(f'./models/{cfg['jepa']['name']}/best.ckpt')
+    model = ActorAR.load_from_checkpoint(f'./models/{cfg['actor']['name']}/best.ckpt', cfg=cfg, jepa=jepa)
+    logger.info(f'Model architecture: {model}')
+
+    checkpoint_dir = f"./models/{cfg['actor']['name']}-AR"
+
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=checkpoint_dir,
+        filename="best",
+        monitor="val/actor_loss",
+        mode="min",
+        save_top_k=1,
+        save_last=True,
+    )
+
+    early_stopping = EarlyStopping(
+        monitor="val/actor_loss",
+        mode="min",
+        patience=cfg['actor']['training']['patience'],
+        min_delta=0.0,
+    )
+
+    lr_monitor = LearningRateMonitor(logging_interval='step')
+
+    ckpt_path = None
+    wandb_logger = WandbLogger(
+        entity='rudyhuy',
+        project=cfg['experiment_name'],
+        name=cfg['actor']['name'] + '-AR',
+    )
 
     trainer = L.Trainer(
         max_epochs=cfg['actor']['training']['epochs'],
@@ -211,7 +299,7 @@ def main():
     )
     parser.add_argument(
         "mode",
-        choices=['jepa', 'actor'],
+        choices=['jepa', 'actor', 'both', 'actor-ar'],
         help="Choose 'jepa' for jepa training or 'actor' for actor training",
     )
     parser.add_argument(
@@ -227,6 +315,13 @@ def main():
 
     elif args.mode == "actor":
         train_actor(cfg, resume=args.resume)
+    
+    elif args.mode == 'both':
+        train_jepa(cfg, resume=args.resume)
+        train_actor(cfg, resume=args.resume)
+    
+    elif args.mode == 'actor-ar':
+        train_actor_ar(cfg)
 
 
 if __name__ == "__main__":

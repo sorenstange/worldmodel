@@ -23,7 +23,7 @@ class Actor(L.LightningModule):
             num_layers = cfg['actor']['backbone']['num_layers'],
             num_heads = cfg['actor']['backbone']['num_heads'],
             max_len = cfg['actor']['backbone']['max_len'],
-            condition_dim = 1+cfg['jepa']['return_head']['num_bins'] ,
+            condition_dim = cfg['jepa']['return_head']['num_bins'],
             dropout = cfg['actor']['backbone']['dropout']
         )
 
@@ -66,14 +66,12 @@ class Actor(L.LightningModule):
 
         Z_in = Z[:, :-1]
         Ret_in = Ret[:, :-1]
-        Act_in = Act[:, :-1]
 
         with torch.no_grad():
             Zp1, Ret_logits = self.jepa.predict(Z_in, Ret_in)
             Ret_probs = torch.softmax(Ret_logits, dim=-1)
 
-        cond = torch.cat((Ret_probs, Act_in), dim=-1)
-        act_logits = self(Z_in, cond)
+        act_logits = self(Zp1, Ret_probs)
 
         act_target = Act_target[:, 1:] 
 
@@ -94,101 +92,64 @@ class Actor(L.LightningModule):
 
         Z_in = Z[:, :-1]
         Ret_in = Ret[:, :-1]
-        Act_in = Act[:, :-1]
 
         with torch.no_grad():
             Zp1, Ret_logits = self.jepa.predict(Z_in, Ret_in)
             Ret_probs = torch.softmax(Ret_logits, dim=-1)
 
-        cond = torch.cat((Ret_probs, Act_in), dim=-1)
-        act_logits = self(Z_in, cond)
+        act_logits = self(Zp1, Ret_probs)
 
         act_target = Act_target[:, 1:] 
 
         act_logits_flat = act_logits.reshape(-1, act_logits.size(-1))
         act_target_flat = act_target.reshape(-1).long()
-        L_act = self.CrossEntropyLoss(act_logits_flat, act_target_flat) 
+        L = self.CrossEntropyLoss(act_logits_flat, act_target_flat) 
 
-        self.log('val/actor_loss', L_act, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val/actor_loss', L, on_step=False, on_epoch=True, prog_bar=True)
 
-        b_output = self.backtest(batch, ctx_len = 10)
+        b_output = self.backtest(batch)
         self.log('val/mean_eq', torch.mean(b_output['end_equity']), on_step=False, on_epoch=True, prog_bar=True)
     
-    def backtest(self, batch, ctx_len, act_temp = 1.0):
-        actions, action_probabilities, action_indices = [], [], []
-        returns, return_probabilities = [], []
-        t_actions, t_action_indices = [], []
+    def backtest(self, batch, act_temp = 1.0):
         X, Ret, Act, Act_target = batch['sample'], batch['return'], batch['action'], batch['action_target']
 
         with torch.no_grad():
             Z = self.jepa.encode(X)
 
-        B, Seq, D = Z.shape
+        Z_in = Z[:, :-1]
+        Ret_in = Ret[:, :-1]
 
-        Z_p = Z[:, :ctx_len, :]
-        Ret_p = Ret[:, :ctx_len, :]
-        Act_p = torch.zeros_like(Ret_p)
+        with torch.no_grad():
+            Zp1, Ret_logits = self.jepa.predict(Z_in, Ret_in)
+            Ret_probs = torch.softmax(Ret_logits, dim=-1)
 
-        Z_p = truncate(Z_p, self.backbone.max_len)
-        Ret_p = truncate(Ret_p, self.backbone.max_len)
-        Act_p = truncate(Act_p, self.backbone.max_len)
+        Act_out = Act[:, 1:]
+        Act_out_idx = Act_target[:, 1:]
+        Ret_out = Ret[:, 1:]
 
-        ret0 = Ret[:, ctx_len-1, :].unsqueeze(1)
-        act0 = torch.zeros_like(ret0)
+        act_logits = self(Zp1, Ret_probs)
+        act_logits = act_logits / act_temp
+        act_probs = torch.softmax(act_logits, dim=-1)
+        
+        B, Seq, d = act_probs.shape
+        act_idx = torch.multinomial(act_probs.reshape(B*Seq, d), num_samples=1).reshape(B, Seq, 1)
+        actions = self.action_bins[act_idx]
 
-        backtest_len = Seq - ctx_len
-        for t in range(backtest_len):
-            with torch.no_grad():
-                Zp1, Ret_logits = self.jepa.predict(Z_p, Ret_p)
-                Ret_probs = torch.softmax(Ret_logits, dim=-1)
-                cond = torch.cat((Ret_probs, Act_p), dim=-1)
-                act_logits = self(Z_p, cond)
-
-                act_logits = act_logits[:, -1, :] / act_temp
-                act_probs = torch.softmax(act_logits, dim=-1)
-
-                act_idx = torch.multinomial(act_probs, num_samples=1)
-                new_act = self.action_bins[act_idx].unsqueeze(-1)
-
-            new_Z = Z[:, ctx_len+t, :].unsqueeze(1)
-            new_Ret = Ret[:, ctx_len+t, :].unsqueeze(1)
-            
-            Z_p = torch.cat([Z_p, new_Z], dim=1)
-            Ret_p = torch.cat([Ret_p, new_Ret], dim=1)
-            Act_p = torch.cat([Act_p, new_act], dim=1)
-
-            Z_p = truncate(Z_p, self.backbone.max_len)
-            Ret_p = truncate(Ret_p, self.backbone.max_len)
-            Act_p = truncate(Act_p, self.backbone.max_len)
-
-            t_act = Act[:, ctx_len+t, :].unsqueeze(-1)
-            t_act_i = Act_target[:, ctx_len+t, :].unsqueeze(-1)
-
-            actions.append(new_act); action_probabilities.append(act_probs.unsqueeze(1)); action_indices.append(act_idx)
-            returns.append(new_Ret); return_probabilities.append(Ret_probs[:, -1, :].unsqueeze(1))
-            t_actions.append(t_act); t_action_indices.append(t_act_i)
-
-        actions = torch.concatenate(actions, dim=1)
-        action_probabilities = torch.concatenate(action_probabilities, dim=1)
-        action_indices = torch.concatenate(action_indices, dim=1)
-        returns = torch.concatenate(returns, dim=1)
-        return_probabilities = torch.concatenate(return_probabilities, dim=1)
-        t_actions = torch.concatenate(t_actions, dim=1)
-        t_action_indices = torch.concatenate(t_action_indices, dim=1)
-
-        E, e = equity(torch.cat([act0, actions], dim=1).squeeze(-1), returns.squeeze(-1), c = 0.0005)
-        t_E, t_e = equity(torch.cat([act0, t_actions], dim=1).squeeze(-1), returns.squeeze(-1), c = 0.0005)
+        act0 = torch.zeros((B, 1, 1), device=actions.device)
+   
+        E, e = equity(torch.cat([act0, actions], dim=1).squeeze(-1), Ret_out.squeeze(-1), c = 0.0005)
+        t_E, t_e = equity(torch.cat([act0, Act_out], dim=1).squeeze(-1), Ret_out.squeeze(-1), c = 0.0005)
         
         return {
             'action' : actions,
-            'action_prob' : action_probabilities,
-            'action_idx' : action_indices,
-            'return' : returns,
-            'return_prob' : return_probabilities,
+            'action_prob' : act_probs,
+            'action_idx' : act_idx,
+            'return' : Ret_out,
+            'return_prob' : Ret_probs,
             'equity' : E,
             'end_equity' : e,
-            'opt_action' : t_actions,
-            'opt_action_idx' : t_action_indices,  
+            'opt_action' : Act_out,
+            'opt_action_idx' : Act_out_idx,  
             'opt_equity' : t_E,
             'opt_end_equity' : t_e
         }
@@ -214,3 +175,81 @@ class Actor(L.LightningModule):
                 "frequency": 1
             }
         }
+
+CTX_LEN = 1
+PRED_STEPS = 63
+
+class ActorAR(Actor):
+    def training_step(self, batch, batch_idx):
+        act_logits = self.step(batch, CTX_LEN, PRED_STEPS)
+        Act_target = batch['action_target']
+
+        act_target = Act_target[:, CTX_LEN:CTX_LEN+PRED_STEPS] 
+
+        act_logits_flat = act_logits.reshape(-1, act_logits.size(-1))
+        act_target_flat = act_target.reshape(-1).long()
+        L = self.CrossEntropyLoss(act_logits_flat, act_target_flat) 
+
+        self.log('train/actor_loss', L)
+
+        return L
+
+    def validation_step(self, batch, batch_idx):
+        act_logits = self.step(batch, CTX_LEN, PRED_STEPS)
+        Act_target = batch['action_target']
+
+        act_target = Act_target[:, CTX_LEN:CTX_LEN+PRED_STEPS] 
+
+        act_logits_flat = act_logits.reshape(-1, act_logits.size(-1))
+        act_target_flat = act_target.reshape(-1).long()
+        L = self.CrossEntropyLoss(act_logits_flat, act_target_flat) 
+
+        self.log('val/actor_loss', L, on_step=False, on_epoch=True, prog_bar=True)
+
+        b_output = self.backtest(batch, ctx_len = CTX_LEN)
+        self.log('val/mean_eq', torch.mean(b_output['end_equity']), on_step=False, on_epoch=True, prog_bar=True)
+
+    def step(self, batch, ctx_len, pred_steps):
+        action_logits = []
+        X, Ret = batch['sample'], batch['return']
+
+        with torch.no_grad():
+            Z = self.jepa.encode(X)
+
+        B, Seq, D = Z.shape
+
+        Z_p = Z[:, :ctx_len, :]
+        Ret_p = Ret[:, :ctx_len, :]
+        Act_p = torch.zeros_like(Ret_p)
+
+        Z_p = truncate(Z_p, self.backbone.max_len)
+        Ret_p = truncate(Ret_p, self.backbone.max_len)
+        Act_p = truncate(Act_p, self.backbone.max_len)
+
+        for t in range(pred_steps):
+            with torch.no_grad():
+                Zp1, Ret_logits = self.jepa.predict(Z_p, Ret_p)
+                Ret_probs = torch.softmax(Ret_logits, dim=-1)
+
+            cond = torch.cat((Ret_probs, Act_p), dim=-1)    
+            act_logits = self(Z_p, cond)[:, -1:, :]
+
+            act_idx = torch.argmax(act_logits, dim=-1)
+            new_act = self.action_bins[act_idx].unsqueeze(-1)
+
+            new_Z = Z[:, ctx_len+t, :].unsqueeze(1)
+            new_Ret = Ret[:, ctx_len+t, :].unsqueeze(1)
+            
+            Z_p = torch.cat([Z_p, new_Z.detach()], dim=1)
+            Ret_p = torch.cat([Ret_p, new_Ret.detach()], dim=1)
+            Act_p = torch.cat([Act_p, new_act.detach()], dim=1)
+
+            Z_p = truncate(Z_p, self.backbone.max_len)
+            Ret_p = truncate(Ret_p, self.backbone.max_len)
+            Act_p = truncate(Act_p, self.backbone.max_len)
+
+            action_logits.append(act_logits)
+
+        action_logits = torch.concatenate(action_logits, dim=1)
+        
+        return action_logits

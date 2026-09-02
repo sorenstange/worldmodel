@@ -31,6 +31,7 @@ class Predictor(nn.Module):
 
         mask = self.create_causal_mask(seq_len).to(x.device)
 
+        x = self.embedding(x)
         x = self.pe(x)
         for layer in self.layers:
             x = layer(x, cond, mask)
