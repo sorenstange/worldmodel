@@ -147,6 +147,14 @@ def loss_fn_sh(x, p, c):
     return -torch.sum(sharpe)
 
 
+# Selectable via `[data.actions.loss_fn]`; keys are the config values.
+LOSS_FNS = {
+    'equity': loss_fn_eq,
+    'sortino': loss_fn_so,
+    'sharpe': loss_fn_sh,
+}
+
+
 def make_constrained_loss(base_loss_fn, max_change=0.1, penalty_weight=1000.0):
     def constrained_loss_fn(x, p, c):
         original_loss = base_loss_fn(x, p, c)
