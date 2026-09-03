@@ -48,7 +48,7 @@ class CryptoDataset(Dataset):
         self.symbol_names, self.symbol_ids = [], []
 
         loss_fn = make_constrained_loss(
-            loss_fn_so,
+            loss_fn_eq,
             max_change=dcfg['actions']['max_change'],
             penalty_weight=dcfg['actions']['penalty_weight'],
         )
@@ -134,7 +134,7 @@ class CryptoDataset(Dataset):
             max_change=dcfg['actions']['max_change'],
             penalty=dcfg['actions']['penalty_weight'],
             steps=dcfg['actions']['opt_steps'], lr=dcfg['actions']['opt_lr'],
-            loss='sortino_v2',
+            loss='equity_v1',
         )
         cache_dir = './data/cache'
 

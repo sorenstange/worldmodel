@@ -34,7 +34,7 @@ data:
     min_value: -1.0
     max_value: 1.0
     commission_value: 0.0005   # 5 bps, charged on |change in allocation|
-    max_change: 0.1            # oracle turnover constraint, per 15m step
+    max_change: 0.25            # oracle turnover constraint, per 15m step
     penalty_weight: 1000.0
     opt_steps: 1000
     opt_lr: 0.01
