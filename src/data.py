@@ -47,11 +47,12 @@ class CryptoDataset(Dataset):
         # down per market rather than reporting one pooled number.
         self.symbol_names, self.symbol_ids = [], []
 
-        loss_fn = make_constrained_loss(
+        '''loss_fn = make_constrained_loss(
             loss_fn_eq,
             max_change=dcfg['actions']['max_change'],
             penalty_weight=dcfg['actions']['penalty_weight'],
-        )
+        )'''
+        loss_fn = loss_fn_eq
 
         for symbol, d, t, v, fingerprint in load_data(cfg, mode):
             d = torch.from_numpy(d)
@@ -134,7 +135,7 @@ class CryptoDataset(Dataset):
             max_change=dcfg['actions']['max_change'],
             penalty=dcfg['actions']['penalty_weight'],
             steps=dcfg['actions']['opt_steps'], lr=dcfg['actions']['opt_lr'],
-            loss='equity_v1',
+            loss='equity_v2',
         )
         cache_dir = './data/cache'
 
