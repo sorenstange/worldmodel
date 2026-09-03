@@ -34,6 +34,8 @@ data:
     min_value: -1.0
     max_value: 1.0
     commission_value: 0.0005   # 5 bps, charged on |change in allocation|
+    loss_fn: 'equity'          # oracle objective: 'equity' | 'sortino' | 'sharpe' (see util.LOSS_FNS)
+    constrained: true          # apply the turnover penalty below on top of loss_fn
     max_change: 0.25            # oracle turnover constraint, per 15m step
     penalty_weight: 1000.0
     opt_steps: 1000

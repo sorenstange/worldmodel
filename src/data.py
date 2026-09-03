@@ -47,10 +47,16 @@ class CryptoDataset(Dataset):
         # down per market rather than reporting one pooled number.
         self.symbol_names, self.symbol_ids = [], []
 
-        loss_fn = make_constrained_loss(
-            loss_fn_eq,
-            max_change=dcfg['actions']['max_change'],
-            penalty_weight=dcfg['actions']['penalty_weight'],
+        base_loss_fn = LOSS_FNS[dcfg['actions']['loss_fn']]
+        constrained = dcfg['actions'].get('constrained', True)
+        loss_fn = (
+            make_constrained_loss(
+                base_loss_fn,
+                max_change=dcfg['actions']['max_change'],
+                penalty_weight=dcfg['actions']['penalty_weight'],
+            )
+            if constrained
+            else base_loss_fn
         )
 
         for symbol, d, t, v, fingerprint in load_data(cfg, mode):
@@ -126,15 +132,18 @@ class CryptoDataset(Dataset):
     def _oracle_actions(self, cfg, symbol, mode, t, fingerprint, loss_fn, logger):
         """Oracle labels are ~1000 Adam steps per symbol, so cache them."""
         dcfg = cfg['data']
+        constrained = dcfg['actions'].get('constrained', True)
         key = cache_key(
             symbol=symbol, mode=mode, fingerprint=fingerprint,
             window=dcfg['window_size'], seq=dcfg['sequence_length'],
             stride=dcfg['stride'] if mode == 'training' else dcfg.get('eval_stride', dcfg['sequence_length']),
             commission=dcfg['actions']['commission_value'],
-            max_change=dcfg['actions']['max_change'],
-            penalty=dcfg['actions']['penalty_weight'],
+            loss_fn=dcfg['actions']['loss_fn'],
+            constrained=constrained,
+            # Only part of the objective (and thus the cache key) when actually applied.
+            max_change=dcfg['actions']['max_change'] if constrained else None,
+            penalty=dcfg['actions']['penalty_weight'] if constrained else None,
             steps=dcfg['actions']['opt_steps'], lr=dcfg['actions']['opt_lr'],
-            loss='equity_v1',
         )
         cache_dir = './data/cache'
 
