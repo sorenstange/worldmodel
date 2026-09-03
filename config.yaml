@@ -82,12 +82,12 @@ jepa:
     weight_decay: 0.01
     warmup_steps: 2000        # in STEPS, not epochs
     sched_steps: null         # null -> derive from max_epochs x steps/epoch
-    epochs: 60                # keep patience < epochs or the cosine never decays
+    epochs: 200               # keep patience < epochs or the cosine never decays
     batch_size: 128
     rollout_steps: 8          # horizon of the autoregressive term
     rollout_batch: 32         # sub-batch for it; k passes are held for backprop
     log_every_n_steps: 10
-    patience: 10
+    patience: 40
 
 actor:
   name: 'actor'
@@ -111,12 +111,12 @@ actor:
   training:
     lr: 0.0003
     weight_decay: 0.01
-    warmup_steps: 1000
+    warmup_steps: 2000
     sched_steps: null
-    epochs: 60
+    epochs: 200
     batch_size: 256
     log_every_n_steps: 10
-    patience: 10
+    patience: 40
   test:
     batch_size: 128
     act_temp: 1.0
