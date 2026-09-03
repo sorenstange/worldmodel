@@ -48,6 +48,7 @@ CFG = {
         'backbone': {'num_layers': 2, 'num_heads': 4, 'ff_mult': 4, 'max_len': S, 'dropout': 0.1},
         'action_head': {'num_bins': ACT_BINS, 'min_value': -1.0, 'max_value': 1.0, 'dropout': 0.1},
         'ar': {'ctx_len': 2, 'pred_steps': 5},
+        'eval': {'ctx_len': 1, 'pred_steps': None, 'val_pred_steps': 4},
         'training': {'lr': 3e-4, 'weight_decay': 0.01, 'warmup_steps': 10,
                      'sched_steps': 100, 'epochs': 1, 'batch_size': B,
                      'log_every_n_steps': 1, 'patience': 1},
@@ -243,14 +244,46 @@ def main():
         actor.eval()
         with torch.no_grad():
             b = actor.backtest(batch)
+        # eval ctx_len defaults to 1, so the rollout covers windows 1..S-1 --
+        # the same span the (leaky) teacher-forced pass used to report.
         eq(b['action'].shape, (B, S - 1, 1), 'actions')
         eq(b['equity'].shape, (B, S - 1), 'equity curve')
         eq(b['end_equity'].shape, (B,), 'end equity')
+        eq(b['return_prob'].shape, (B, S - 1, RET_BINS), 'return probabilities')
         for k in ('end_equity', 'opt_end_equity', 'bh_end_equity'):
             finite(b[k], k)
         assert b['action'].abs().max() <= 1.0, 'allocation out of range'
         actor.train()
     check('backtest with oracle and buy-and-hold baselines', t_backtest)
+
+    def t_backtest_no_oracle_leak():
+        # The default backtest must not read the oracle allocations at all --
+        # they are fitted over the whole future. Corrupting them must leave the
+        # policy's own equity untouched (only the oracle baseline may move).
+        actor.eval()
+        dirty = dict(batch)
+        dirty['action'] = -batch['action']
+        with torch.no_grad():
+            b = actor.backtest(batch)
+            d = actor.backtest(dirty)
+            tf = actor.backtest(batch, teacher_force=True)
+            tf_d = actor.backtest(dirty, teacher_force=True)
+        assert torch.allclose(b['action'], d['action']), (
+            'autoregressive backtest is reading the oracle action path')
+        assert not torch.allclose(tf['action'], tf_d['action']), (
+            'teacher-forced pass should depend on the oracle -- that is the point of it')
+        eq(tf['action'].shape, (B, S - 1, 1), 'teacher-forced actions')
+        actor.train()
+    check('backtest does not condition on oracle actions', t_backtest_no_oracle_leak)
+
+    def t_backtest_ctx():
+        actor.eval()
+        with torch.no_grad():
+            b = actor.backtest(batch, ctx_len=3, pred_steps=4)
+        eq(b['action'].shape, (B, 4, 1), 'short-horizon actions')
+        eq(b['return_prob'].shape, (B, 4, RET_BINS), 'short-horizon return probabilities')
+        actor.train()
+    check('backtest honours ctx_len / pred_steps', t_backtest_ctx)
 
     def t_oracle_beats():
         actor.eval()
@@ -277,10 +310,11 @@ def main():
         actor_ar.eval()
         with torch.no_grad():
             b = actor_ar.backtest(batch)
-        steps = CFG['actor']['ar']['pred_steps']
-        eq(b['action'].shape, (B, steps, 1), 'AR actions')
-        eq(b['equity'].shape, (B, steps), 'AR equity')
-        eq(b['return_prob'].shape, (B, steps, RET_BINS), 'AR return probabilities')
+        # ActorAR inherits Actor.backtest, so it is scored over the same span
+        # (eval ctx_len = 1), not over the shorter training rollout.
+        eq(b['action'].shape, (B, S - 1, 1), 'AR actions')
+        eq(b['equity'].shape, (B, S - 1), 'AR equity')
+        eq(b['return_prob'].shape, (B, S - 1, RET_BINS), 'AR return probabilities')
         actor_ar.train()
     check('autoregressive backtest', t_ar_backtest)
 

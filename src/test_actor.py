@@ -33,7 +33,7 @@ from viz import plt
 NUM_PLOT_SEQS = 8
 
 
-def run_backtest(model, loader, device, decode, act_temp, logger):
+def run_backtest(model, loader, device, decode, act_temp, logger, teacher_force=False):
     out = {k: [] for k in ('equity', 'opt_equity', 'bh_equity', 'end_equity',
                            'opt_end_equity', 'bh_end_equity', 'action',
                            'opt_action', 'return_raw', 'symbol_id')}
@@ -42,7 +42,8 @@ def run_backtest(model, loader, device, decode, act_temp, logger):
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
         with torch.no_grad():
-            b = model.backtest(batch, act_temp=act_temp, decode=decode)
+            b = model.backtest(batch, act_temp=act_temp, decode=decode,
+                               teacher_force=teacher_force)
         b = {k: v.detach().cpu().numpy() for k, v in b.items()}
 
         for k in out:
@@ -205,6 +206,10 @@ def main():
     parser.add_argument('--ar', action='store_true', help='Evaluate the autoregressive fine-tune.')
     parser.add_argument('--ckpt', default='best', choices=['best', 'last'])
     parser.add_argument('--decode', default='expected', choices=['expected', 'argmax', 'sample'])
+    parser.add_argument('--teacher-force', action='store_true',
+                        help='DIAGNOSTIC ONLY: condition on the clairvoyant oracle '
+                             'allocations instead of the policy\'s own. Leaks the future; '
+                             'the gap to the real run is the behaviour-cloning train/test gap.')
     args = parser.parse_args()
 
     OmegaConf.register_new_resolver("eval", eval, replace=True)
@@ -212,7 +217,9 @@ def main():
     logger = set_logger(cfg)
     viz.use_style()
 
-    folder = './figs/backtest'
+    # The diagnostic run writes elsewhere so a leaky metrics.json can never be
+    # mistaken for the real one.
+    folder = './figs/backtest-teacher-forced' if args.teacher_force else './figs/backtest'
     os.makedirs(folder, exist_ok=True)
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -226,8 +233,13 @@ def main():
     dataset = CryptoDataset(cfg, mode='test', make_action=True)
     loader = DataLoader(dataset, batch_size=cfg['actor']['test']['batch_size'], shuffle=False)
 
+    if args.teacher_force:
+        logger.warning('--teacher-force: conditioning on the ORACLE allocation path. '
+                       'These numbers leak the future and are not a backtest.')
+
     r, first = run_backtest(model, loader, device,
-                            args.decode, cfg['actor']['test']['act_temp'], logger)
+                            args.decode, cfg['actor']['test']['act_temp'], logger,
+                            teacher_force=args.teacher_force)
 
     commission = cfg['data']['actions']['commission_value']
     rows = [

@@ -180,6 +180,29 @@ early-stopping monitor. `'sample'` and `'argmax'` are available.
 oracle's, closing the behaviour-cloning train/test gap. It rolls forward on *real* market
 latents and returns — only the action history is self-generated.
 
+#### Training is teacher-forced; evaluation is not
+
+Training conditions on the oracle's previous allocation (ordinary behaviour cloning).
+**`backtest` must not.** `batch['action']` is the clairvoyant oracle path, fitted with Adam
+over the whole 64-step future, so conditioning on it at eval time (a) leaks the future —
+the backbone is causal, so position `t` sees oracle allocations `0..t` — and (b) charges
+commission against a position path the policy never saw, since `_equity_bundle` diffs the
+*actor's own* actions. The oracle path is smooth by construction (`max_change`), so its lag
+is close to a copy of the label: a network that learns the identity map off the condition
+scores well having learned nothing.
+
+So `Actor.rollout` (shared with `ActorAR`, which additionally *trains* through it) feeds
+back the policy's own allocations, starting flat, and `Actor.backtest` uses it by default —
+`[actor.eval.ctx_len]` = 1 real windows of context, then self-feeding to the end
+(`[actor.eval.pred_steps]` = `null`). `[actor.eval.val_pred_steps]` caps the in-training
+monitor, since each step is a sequential forward pass and validation runs every epoch.
+Both actors are scored over the same span, so the two are actually comparable.
+
+`backtest(teacher_force=True)` reproduces the leaky oracle-conditioned pass. It is logged
+as `val/mean_eq_tf` and available via `test_actor.py --teacher-force` **as a diagnostic
+only** — the gap to the honest number *is* the behaviour-cloning train/test gap, which is
+the thing `ActorAR` exists to close. Never report it as a result.
+
 ## Running things
 
 `uv`-managed (Python >= 3.14, torch on the `cu126` index).
@@ -195,7 +218,9 @@ uv run src/test_jepa.py              # world-model eval -> figs/dreams/
 uv run src/test_actor.py [--ar]      # trading eval     -> figs/backtest/
 ```
 
-`test_actor.py` also takes `--ckpt {best,last}` and `--decode {expected,argmax,sample}`.
+`test_actor.py` also takes `--ckpt {best,last}`, `--decode {expected,argmax,sample}` and
+`--teacher-force` (diagnostic; writes to `figs/backtest-teacher-forced/` so a leaky
+`metrics.json` can never be mistaken for the real one).
 
 ## Evaluation
 
@@ -298,6 +323,16 @@ already exists and is unused); `max_change` and the oracle's turnover penalty.
 
 ## Bugs fixed in the last pass (do not reintroduce)
 
+- **`Actor.backtest` conditioned on the oracle's previous allocation.** Future leakage, not
+  merely exposure bias — and `val/mean_eq`, the checkpoint *and* early-stopping monitor, ran
+  on it, so model selection itself was contaminated. Backtests are autoregressive now; see
+  *Training is teacher-forced; evaluation is not*. Every number in `figs/backtest/` from
+  before this change is void.
+- **`Actor` and `ActorAR` were scored over different spans** (`1..S-1` vs `ctx_len..ctx_len+
+  pred_steps`), so the comparison between them measured horizon as much as policy. Both now
+  inherit one `backtest` driven by `[actor.eval]`.
+- `ActorAR.rollout` capped `pred_steps` at `S - 1 - ctx_len`, one step short of the
+  sequence; it is `S - ctx_len`.
 - **`loss_fn_so` was not Sortino.** It thresholded on `dE < 0`, but `dE` is a gross return
   factor near 1.0, so the mask was almost always empty, `downside_std` collapsed to 0 and
   the ratio blew up. It was effectively maximising mean return with no risk term at all.

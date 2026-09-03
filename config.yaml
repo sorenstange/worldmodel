@@ -108,6 +108,12 @@ actor:
     ctx_len: 8         # 2h of real context before the policy takes over
     pred_steps: 16     # each step is a sequential backbone pass held for backprop
     batch_size: 32     # ...so this must be far below the teacher-forced batch
+  eval:
+    # Shared by Actor and ActorAR so the two are scored identically.
+    ctx_len: 1         # >= 1; the policy self-feeds from the first step, flat
+    pred_steps: null   # null = roll to the end of the sequence
+    val_pred_steps: 24 # in-training monitor is capped -- each step is a
+                       # sequential forward pass, and validation runs every epoch
   training:
     lr: 0.0003
     weight_decay: 0.01
