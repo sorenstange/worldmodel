@@ -26,11 +26,12 @@ commission `[data.actions.commission_value]` charged on turnover:
 | 1. World model | Implemented | `JEPA`: encoder + AdaLN predictor + return head, SIGReg, multi-step rollout |
 | 2. Imitation actor | Implemented | `Actor`: behaviour-cloning of the Sortino oracle on frozen latents |
 | 2b. Autoregressive actor | Implemented, unrun | `ActorAR`: conditions on its own past allocations |
-| 3. RL actor | Planned, not started | PPO on the frozen latents; possibly training inside `JEPA.dream` rollouts |
+| 3. RL actor | Implemented, unrun | `ActorRL`: PPO **or** exact analytic-gradient policy search on the frozen latents, on real data or inside `JEPA.dream` |
 
-Stage 3 is the intended end state; stage 2 is the warm start for it. A prior PPO
-actor-critic (GAE, clipping, entropy bonus) was written and later removed — recover it
-from `git show 27d3f9d:src/actorcritic.py` rather than starting from scratch.
+Stage 3 is the intended end state and stage 2 is its warm start: `ActorRL` loads
+`models/[actor.name]/best.ckpt` and fine-tunes it. The earlier PPO actor-critic at
+`git show 27d3f9d:src/actorcritic.py` is superseded — see *Stage 3* below for what it
+got wrong — but is still readable history.
 
 ## Pipeline at a glance
 
@@ -41,6 +42,7 @@ Binance API --> data/raw/{SYMBOL}.csv        (1m OHLCV, futures klines)
             --> JEPA        (encoder + predictor + return head)   [stage 1, frozen after]
             --> Actor       (backbone + action head)              [stage 2]
             --> ActorAR     (autoregressive fine-tune)            [stage 2b]
+            --> ActorRL     (PPO / analytic-gradient fine-tune)   [stage 3]
             --> test_jepa / test_actor  (metrics.py + viz.py) -> figs/ + metrics.json
 ```
 
@@ -203,6 +205,76 @@ as `val/mean_eq_tf` and available via `test_actor.py --teacher-force` **as a dia
 only** — the gap to the honest number *is* the behaviour-cloning train/test gap, which is
 the thing `ActorAR` exists to close. Never report it as a result.
 
+### Stage 3 — `ActorRL` (`src/rl.py`)
+
+Subclasses `Actor`, so the network, the decoder, `_equity_bundle` and `backtest` are
+the same objects; only the training signal changes. Warm-started from the stage-2
+checkpoint (`[rl.from_ar]` switches to the stage-2b one).
+
+**Three structural facts drive every default here**, and they are why this is not a
+generic RL setup:
+
+1. **The reward is closed-form and differentiable in the action.**
+   `delta_equity(x, p, c) = x_t*p_t - c*|dx| + 1`. Nothing about it has to be learned.
+2. **Actions do not affect the dynamics.** An allocation does not move the market, so
+   `(Z_t, r_t) -> (Z_{t+1}, r_{t+1})` is exogenous and the only action-dependent state
+   is the position, which is observed and deterministic. Therefore:
+   - On-policy data is **free on real market data**. The usual reason to roll out
+     inside a world model — expensive environment interaction — does not apply, so
+     `[rl.env]` defaults to `'real'`. `'dream'` and `'mixed'` exist, but if the return
+     head is only marginally better than the unconditional distribution then a dreamed
+     market is a near-iid draw from the marginal, and the best policy against that is
+     a constant. Dreams also need a `vol` normaliser the model does not predict, so it
+     is held at its last real value — a real, documented bias.
+   - **Credit assignment is two steps deep.** `a_t` enters `r_t` and, through
+     `c|a_{t+1} - a_t|`, `r_{t+1}`; beyond that it acts only via the policy's own later
+     choices. GAE at `lambda ~ 0.95` over 64 steps therefore pours in market noise that
+     `a_t` had no influence over, which is why `[rl.gae_lambda]` defaults to **0.5**,
+     not the usual value. `[rl.gamma]` is **1.0** and is not a tuning knob: the
+     undiscounted sum of per-step log growth *is* log terminal equity.
+3. **Collection is sequential; the update is not.** The policy's only autoregressive
+   input is its previous allocation, and during the update that path is stored data —
+   so re-scoring a whole episode is ONE teacher-forced pass, not T recurrent ones
+   (`_replay_inputs` / `_score`). The removed `actorcritic.py` flattened transitions
+   into length-1 sequences for its update, discarding the transformer's context
+   entirely. `smoke_test.py` asserts the replay reproduces the collection logits
+   exactly; if that ever stops holding, every PPO ratio is wrong.
+
+**Two estimators**, `[rl.objective]`:
+
+- `ppo` — clipped surrogate on sampled bins, GAE advantage, value head on the shared
+  backbone (zero-initialised, since true `V` is near 0 here; `[rl.critic.warmup_updates]`
+  trains it alone before it is allowed to move the policy).
+- `analytic` — because (1) and (2) hold, the gradient of terminal log-equity w.r.t.
+  the policy is **exact**: backprop straight through the differentiable `expected`
+  decode. No critic, no policy-gradient variance. This is `util.optimal_allocation`
+  with the allocation parameterised by a causal network instead of free clairvoyant
+  variables. `[rl.analytic.objective]` picks log-equity or Sortino. It is a direct
+  policy search, so expect it to overfit the training split harder than PPO.
+
+**The load-bearing regulariser is `[rl.*.kl_coef]`, not the entropy bonus.** Entropy
+over 51 *ordered* bins pulls toward uniform on [-1, 1], a nonsense prior for an
+allocation. The KL is measured against a frozen copy of the behaviour-cloned policy —
+a risk-aware prior distilled from the Sortino oracle — and is what stops a run
+collapsing onto the attractor RL loves here: all-in long, because the training split
+trends up. The reference lives in the state dict (so `--resume` keeps it) and is pinned
+by `sync_reference()` at launch, guarded by the `ref_synced` buffer.
+
+`[rl.disable_dropout]` is on by default: PPO's ratio is a trust region only if
+collection and update see the same network, and dropout makes `new_logp != old_logp`
+at epoch 0 for identical weights.
+
+Evaluation is `Actor.backtest`, inherited **unchanged**, so the RL policy is scored on
+the same honest autoregressive rollout over the same `[actor.eval]` span as `Actor` and
+`ActorAR`. `val/mean_eq` stays the checkpoint and early-stopping monitor. `val/bc_ce`
+logs cross-entropy against the oracle as a *drift* diagnostic — it is expected to get
+worse if RL is finding anything the clairvoyant labels do not contain.
+
+`ActorRL` uses manual optimisation (PPO takes several optimiser steps per collected
+batch), so `build_trainer` must be given `gradient_clip_val=None` for it — Lightning
+raises rather than ignores automatic clipping in that mode — and `ActorRL` clips
+inside its own update instead.
+
 ## Running things
 
 `uv`-managed (Python >= 3.14, torch on the `cu126` index).
@@ -214,8 +286,9 @@ uv run src/main.py jepa    [--resume]
 uv run src/main.py actor   [--resume]
 uv run src/main.py both    [--resume]
 uv run src/main.py actor-ar[--resume]
+uv run src/main.py rl      [--resume]  # stage 3, warm-started from the actor
 uv run src/test_jepa.py              # world-model eval -> figs/dreams/
-uv run src/test_actor.py [--ar]      # trading eval     -> figs/backtest/
+uv run src/test_actor.py [--ar|--rl] # trading eval     -> figs/backtest/
 ```
 
 `test_actor.py` also takes `--ckpt {best,last}`, `--decode {expected,argmax,sample}` and
@@ -283,10 +356,11 @@ persisted to `models/<name>/wandb_id.txt` so `--resume` rejoins the right run.
 **Cluster**: `jobs/*.sh` are LSF scripts for the DTU HPC (`bsub < jobs/jepa.sh`). They
 hardcode `/zhome/d3/0/155487/worldmodel` and a v100 32GB queue.
 
-**Local dev constraint**: on the Windows dev machine, Windows Application Control blocks
-torch's DLLs (`c10.dll`), for every build and location tried. numpy/pandas work, so the
-data pipeline is testable locally but **no torch code can run there** — model changes must
-be smoke-tested on the cluster.
+**Local dev constraint**: this used to say that Windows Application Control blocked
+torch's DLLs (`c10.dll`) on the Windows dev machine. As of 2026-09-06 that is no longer
+true — `uv run src/smoke_test.py` runs there on CPU, torch 2.13.0+cu126, in about two
+minutes. Training still belongs on the cluster (no local GPU), but wiring changes can
+and should be smoke-tested locally first.
 
 ## Known issues / open work
 
@@ -297,7 +371,15 @@ be smoke-tested on the cluster.
 3. No purging/embargo at split boundaries.
 4. No unit tests beyond `smoke_test.py` (which covers shapes end-to-end and the
    `metrics.py` scoring functions numerically); no `README.md`.
-5. Stage 3 (RL) not started.
+5. `ActorRL` has never been run on real data. `smoke_test.py` covers it end to end on
+   synthetic data (both estimators, through a real Lightning `fit`), but nothing has
+   been trained.
+6. **`util.loss_fn_so` is not the fixed version this file describes below.** The live
+   body still thresholds on `dE < 0`; the corrected shortfall-below-break-even version
+   sits next to it inside a string literal. Every cached oracle label under
+   `data/cache/` was therefore produced by the broken objective. `rl.sortino_ratio` is
+   the correct implementation. Fixing `loss_fn_so` invalidates the label cache and
+   means retraining stages 2 / 2b / 3.
 
 ## Hyperparameter review
 
@@ -320,6 +402,12 @@ Still worth sweeping: `d_model` and depth (the above is a guess, not a measureme
 `lam_rollout` and `rollout_steps`; `lam_SIGReg`; the +-5 sigma bin range (16 of 61 bins
 carry >1% of mass, so non-uniform or quantile bins are an option — note `util.symlog`
 already exists and is unused); `max_change` and the oracle's turnover penalty.
+
+For stage 3, nothing is tuned at all. The knobs most likely to matter, in order:
+`[rl.gae_lambda]` (the argument above says short; 0.0—0.95 is the range worth
+measuring), `[rl.ppo.kl_coef]` (too low and the policy degenerates, too high and it
+never leaves the clone), `[rl.training.lr]`, `[rl.objective]` itself, and
+`[rl.reward.downside_coef]` if the Sortino side of the definition of done lags.
 
 ## Bugs fixed in the last pass (do not reintroduce)
 

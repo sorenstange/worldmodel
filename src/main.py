@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from actor import Actor, ActorAR
 from data import CryptoDataset
 from jepa import JEPA
+from rl import ActorRL
 from util import set_logger
 
 WANDB_ENTITY = 'rudyhuy'
@@ -50,7 +51,8 @@ def resolve_run_id(checkpoint_dir, resume):
     return run_id, 'allow'
 
 
-def build_trainer(cfg, tcfg, name, checkpoint_dir, monitor, mode, resume):
+def build_trainer(cfg, tcfg, name, checkpoint_dir, monitor, mode, resume,
+                  gradient_clip_val=1.0):
     logger = logging.getLogger(cfg['experiment_name'])
 
     ckpt_path = None
@@ -86,7 +88,9 @@ def build_trainer(cfg, tcfg, name, checkpoint_dir, monitor, mode, resume):
         max_epochs=tcfg['epochs'],
         accelerator='auto',
         devices='auto',
-        gradient_clip_val=1.0,
+        # None for the RL stage: Lightning refuses automatic clipping under
+        # manual optimisation, so ActorRL clips inside its own update.
+        gradient_clip_val=gradient_clip_val,
         logger=wandb_logger,
         callbacks=callbacks,
         log_every_n_steps=tcfg['log_every_n_steps'],
@@ -150,6 +154,39 @@ def train_actor_ar(cfg, resume=False):
     trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
 
 
+def train_rl(cfg, resume=False):
+    logger = logging.getLogger(cfg['experiment_name'])
+    rcfg = cfg['rl']
+    logger.info(f"Starting RL stage ({rcfg['objective']} on the {rcfg['env']} environment)")
+
+    tcfg = rcfg['training']
+    train_loader, val_loader = make_loaders(cfg, tcfg['batch_size'], make_action=True)
+
+    jepa = JEPA.load_from_checkpoint(f"./models/{cfg['jepa']['name']}/best.ckpt", cfg=cfg)
+
+    # Warm start from the behaviour-cloned policy -- stage 2 exists for this.
+    # strict=False because the BC checkpoint has neither the critic head nor the
+    # frozen KL reference; both are freshly built by ActorRL.__init__.
+    bc_name = cfg['actor']['name'] + ('-AR' if rcfg.get('from_ar', False) else '')
+    bc_ckpt = f'./models/{bc_name}/best.ckpt'
+    model = ActorRL.load_from_checkpoint(bc_ckpt, cfg=cfg, jepa=jepa, strict=False)
+    logger.info(f'Warm-started the policy from {bc_ckpt}')
+
+    if not resume:
+        # Pin the KL prior to the behaviour-cloned weights. On --resume the
+        # checkpoint carries its own reference and must not be re-pinned.
+        model.sync_reference()
+
+    logger.info(f'RL parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}')
+
+    trainer, ckpt_path = build_trainer(
+        cfg, tcfg, rcfg['name'], f"./models/{rcfg['name']}",
+        monitor='val/mean_eq', mode='max', resume=resume,
+        gradient_clip_val=None,
+    )
+    trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
+
+
 def main():
     OmegaConf.register_new_resolver("eval", eval, replace=True)
     cfg = OmegaConf.load('./config.yaml')
@@ -162,9 +199,10 @@ def main():
     parser = argparse.ArgumentParser(description='Train the world model or the actor.')
     parser.add_argument(
         'mode',
-        choices=['jepa', 'actor', 'both', 'actor-ar'],
+        choices=['jepa', 'actor', 'both', 'actor-ar', 'rl'],
         help="'jepa' for world-model training, 'actor' for the policy, "
-             "'actor-ar' for the autoregressive fine-tune.",
+             "'actor-ar' for the autoregressive fine-tune, 'rl' for the "
+             "reinforcement-learning stage on top of the cloned policy.",
     )
     parser.add_argument('--resume', action='store_true',
                         help='Resume training from the last checkpoint.')
@@ -180,6 +218,8 @@ def main():
         train_actor(cfg, resume=args.resume)
     elif args.mode == 'actor-ar':
         train_actor_ar(cfg, resume=args.resume)
+    elif args.mode == 'rl':
+        train_rl(cfg, resume=args.resume)
 
 
 if __name__ == '__main__':

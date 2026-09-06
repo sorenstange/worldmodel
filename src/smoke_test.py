@@ -4,7 +4,7 @@
 
 Builds a miniature config and pushes synthetic data through every path the
 training and evaluation scripts use: encode, teacher-forced step, multi-step
-rollout, dream, actor, autoregressive actor, backtest. It asserts shapes and
+rollout, dream, actor, autoregressive actor, backtest, RL. It asserts shapes and
 that losses are finite -- it does not check that anything learns.
 """
 
@@ -14,6 +14,7 @@ import torch
 
 from actor import Actor, ActorAR
 from jepa import JEPA
+from rl import ActorRL, sortino_ratio
 from util import (bin_centers, delta_equity, equity, latent_diagnostics,
                   loss_fn_so, make_constrained_loss, optimal_allocation,
                   preprocess_classes)
@@ -53,6 +54,20 @@ CFG = {
                      'sched_steps': 100, 'epochs': 1, 'batch_size': B,
                      'log_every_n_steps': 1, 'patience': 1},
         'test': {'batch_size': B, 'act_temp': 1.0, 'num_plots': 1},
+    },
+    'rl': {
+        'name': 'actor-rl', 'from_ar': False, 'objective': 'ppo', 'env': 'real',
+        'dream_prob': 0.5, 'dream_temp': 1.0,
+        'ctx_len': 2, 'pred_steps': 4, 'act_temp': 1.0, 'disable_dropout': True,
+        'gamma': 1.0, 'gae_lambda': 0.5,
+        'reward': {'downside_coef': 0.0, 'max_change': None, 'turnover_penalty': 0.0},
+        'ppo': {'clip': 0.2, 'epochs': 2, 'minibatch': 2, 'vf_coef': 0.5,
+                'ent_coef': 0.001, 'kl_coef': 0.02, 'norm_adv': True, 'target_kl': None},
+        'analytic': {'objective': 'logeq', 'ent_coef': 0.0, 'kl_coef': 0.02},
+        'critic': {'detach_trunk': False, 'warmup_updates': 0},
+        'training': {'lr': 2e-5, 'weight_decay': 0.01, 'warmup_steps': 5,
+                     'sched_steps': 50, 'epochs': 1, 'batch_size': B,
+                     'log_every_n_steps': 1, 'patience': 1},
     },
 }
 
@@ -317,6 +332,135 @@ def main():
         eq(b['return_prob'].shape, (B, S - 1, RET_BINS), 'AR return probabilities')
         actor_ar.train()
     check('autoregressive backtest', t_ar_backtest)
+
+    print('\nrl')
+    rl_cfg = copy.deepcopy(CFG)
+    rl = ActorRL(rl_cfg, jepa)
+    rl.train()
+    CTX, STEPS = rl_cfg['rl']['ctx_len'], rl_cfg['rl']['pred_steps']
+
+    def t_rollout_paths():
+        # The one-pass world-model stream must be numerically identical to the
+        # per-step recomputation it replaces. That equality is the whole basis
+        # of the speedup, and of the PPO replay below.
+        rl.eval()
+        with torch.no_grad():
+            fast = rl.rollout(batch, CTX, STEPS, one_pass=True)
+            slow = rl.rollout(batch, CTX, STEPS, one_pass=False)
+        d = (fast['logits'] - slow['logits']).abs().max()
+        assert torch.allclose(fast['logits'], slow['logits'], atol=1e-5), d
+        assert torch.allclose(fast['action'], slow['action'], atol=1e-5)
+        rl.train()
+    check('one-pass rollout matches the incremental path', t_rollout_paths)
+
+    def t_replay():
+        # PPO re-scores a collected episode in ONE parallel pass. If row
+        # ctx_len+t-1 of that pass is not what step t actually saw, every ratio
+        # is wrong and the clip means nothing.
+        rl.eval()
+        with torch.no_grad():
+            roll = rl.rollout(batch, CTX, STEPS, decode='sample')
+            Z_in, cond, steps = rl._replay_inputs(roll)
+            logits, values = rl._score(Z_in, cond, steps)
+        eq(logits.shape, roll['logits'].shape, 'replayed logits')
+        eq(values.shape, (B, STEPS), 'critic values')
+        d = (logits - roll['logits']).abs().max()
+        assert torch.allclose(logits, roll['logits'], atol=1e-5), f'replay differs by {d:.2e}'
+        # The critic starts at exactly zero, so it cannot poison early advantages.
+        assert values.abs().max() == 0.0, 'critic head is not zero-initialised'
+        rl.train()
+    check('PPO replay reproduces the collection logits', t_replay)
+
+    def t_reward():
+        rl.eval()
+        with torch.no_grad():
+            roll = rl.rollout(batch, CTX, STEPS)
+            p = rl._realised(batch, roll, dream=False)
+            r, dE = rl._rewards(roll['action'], p)
+        eq(r.shape, (B, STEPS), 'rewards')
+        finite(r, 'rewards')
+        # The reward path and the backtest must charge identical commission.
+        act0 = torch.zeros((B, 1))
+        _, e = equity(torch.cat([act0, roll['action'].squeeze(-1)], dim=1), p, c=rl.commission)
+        assert torch.allclose(r.sum(dim=-1).exp(), e, atol=1e-5), 'reward sum is not log end-equity'
+        rl.train()
+    check('reward sums to log terminal equity', t_reward)
+
+    def t_gae():
+        rew, val = torch.randn(3, 5), torch.randn(3, 5)
+        rl.gae_lambda, rl.gamma = 0.0, 1.0
+        adv, ret = rl._gae(rew, val)
+        # lambda = 0 is the one-step TD residual, with a zero terminal bootstrap.
+        nxt = torch.cat([val[:, 1:], torch.zeros(3, 1)], dim=1)
+        assert torch.allclose(adv, rew + nxt - val, atol=1e-6)
+        assert torch.allclose(ret, adv + val, atol=1e-6)
+        rl.gae_lambda = 0.5
+    check('GAE reduces to the TD residual at lambda = 0', t_gae)
+
+    def t_sortino():
+        # Growth factors just above break-even: no shortfall, so the ratio must
+        # stay finite and beat a path that dips, rather than exploding on an
+        # empty mask the way the dE < 0 threshold did.
+        good = torch.full((2, 8), 1.01)
+        bad = torch.cat([torch.full((2, 4), 1.02), torch.full((2, 4), 0.98)], dim=1)
+        assert (sortino_ratio(good) > sortino_ratio(bad)).all()
+        assert torch.isfinite(sortino_ratio(good)).all()
+    check('sortino_ratio measures shortfall below break-even', t_sortino)
+
+    def t_analytic_grad():
+        # The analytic objective needs the gradient to survive the fed-back
+        # allocation; detach_actions=True (the BC default) must cut it.
+        roll = rl.rollout(batch, CTX, STEPS, decode='expected', detach_actions=False)
+        assert roll['action'].requires_grad, 'analytic path is detached'
+        p = rl._realised(batch, roll, dream=False)
+        r, _ = rl._rewards(roll['action'], p)
+        (-r.sum(dim=1).mean()).backward()
+        g = rl.actor_head[-1].weight.grad
+        assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0
+        assert rl.jepa.encoder.cls_token.grad is None, 'gradient leaked into the world model'
+        rl.zero_grad(set_to_none=True)
+    check('analytic objective backpropagates into the policy', t_analytic_grad)
+
+    def t_dream():
+        rl.eval()
+        with torch.no_grad():
+            roll = rl._dream_rollout(batch, decode='sample', detach_actions=True)
+        eq(roll['action'].shape, (B, STEPS, 1), 'dreamed actions')
+        eq(roll['return_raw'].shape, (B, STEPS, 1), 'dreamed returns')
+        eq(roll['Z_hat'].shape, (B, CTX + STEPS - 1, 32), 'dreamed latent stream')
+        # Same replay geometry as the real environment, so PPO works unchanged.
+        Z_in, _, _ = rl._replay_inputs(roll)
+        eq(Z_in.shape, (B, CTX + STEPS - 1, 32), 'dream replay inputs')
+        rl.train()
+    check('dream rollout matches the real-environment interface', t_dream)
+
+    def t_fit():
+        # End to end through Lightning: manual optimisation, the scheduler and
+        # the validation backtest that drives checkpointing.
+        import lightning as L
+        from torch.utils.data import DataLoader, Dataset
+
+        class Tiny(Dataset):
+            def __len__(self):
+                return 2 * B
+
+            def __getitem__(self, i):
+                return {k: v[i % B] for k, v in batch.items()}
+
+        for objective in ('ppo', 'analytic'):
+            c = copy.deepcopy(CFG)
+            c['rl']['objective'] = objective
+            m = ActorRL(c, jepa)
+            m.sync_reference()
+            trainer = L.Trainer(
+                max_epochs=1, accelerator='cpu', devices=1, logger=False,
+                enable_checkpointing=False, enable_progress_bar=False,
+                enable_model_summary=False, num_sanity_val_steps=0,
+            )
+            trainer.fit(m, DataLoader(Tiny(), batch_size=B),
+                        DataLoader(Tiny(), batch_size=B))
+            assert int(m.updates) > 0, f'{objective}: no optimiser step was taken'
+    check('rl trains end-to-end under Lightning (ppo + analytic)', t_fit)
 
     print('\nmetrics')
     import numpy as np

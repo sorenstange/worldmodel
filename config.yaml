@@ -129,3 +129,50 @@ actor:
     batch_size: 128
     act_temp: 1.0
     num_plots: 20
+
+rl:
+  # Stage 3. Fine-tunes the behaviour-cloned actor; see the module docstring in
+  # src/rl.py for why these defaults are what they are.
+  name: 'actor-rl'
+  from_ar: false        # warm start from actor-AR instead of actor
+  objective: 'ppo'      # 'ppo' | 'analytic' (exact gradient through the reward)
+  env: 'real'           # 'real' | 'dream' | 'mixed'
+  dream_prob: 0.5       # only used by 'mixed'
+  dream_temp: 1.0       # sampling temperature of the world model's return head
+  ctx_len: 1            # real windows before the policy takes over
+  pred_steps: 32        # episode length; each step is a sequential backbone pass
+  act_temp: 1.0
+  disable_dropout: true # PPO's ratio is only a trust region if collection and
+                        # update see the same network
+  gamma: 1.0            # the undiscounted sum of log returns IS terminal equity
+  gae_lambda: 0.5       # an action only influences its own step and the next
+                        # turnover charge; long lambda adds noise, not signal
+  reward:
+    downside_coef: 0.0  # optional per-step penalty on negative log growth
+    max_change: null    # optional turnover cap, mirroring the oracle's
+    turnover_penalty: 0.0
+  ppo:
+    clip: 0.2
+    epochs: 4
+    minibatch: 64       # over SEQUENCES; the time axis stays intact
+    vf_coef: 0.5
+    ent_coef: 0.001
+    kl_coef: 0.02       # to the frozen BC policy -- the load-bearing regulariser
+    norm_adv: true
+    target_kl: null     # e.g. 0.02 to cut the inner loop short
+  analytic:
+    objective: 'logeq'  # 'logeq' | 'sortino'
+    ent_coef: 0.0
+    kl_coef: 0.02
+  critic:
+    detach_trunk: false
+    warmup_updates: 200 # critic-only updates before the policy starts moving
+  training:
+    lr: 0.00002         # a fine-tune, not a fresh fit -- far below the BC lr
+    weight_decay: 0.01
+    warmup_steps: 200
+    sched_steps: null
+    epochs: 60
+    batch_size: 64      # collection holds pred_steps sequential passes
+    log_every_n_steps: 10
+    patience: 15

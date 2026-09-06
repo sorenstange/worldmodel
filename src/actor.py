@@ -180,7 +180,8 @@ class Actor(L.LightningModule):
             return self.action_bins[idx.squeeze(-1)].unsqueeze(-1), idx
         raise ValueError(f'unknown decode mode: {decode}')
 
-    def rollout(self, batch, ctx_len, pred_steps=None, act_temp=1.0, decode='expected'):
+    def rollout(self, batch, ctx_len, pred_steps=None, act_temp=1.0,
+                decode='expected', detach_actions=True, one_pass=None):
         """Roll the policy forward on real market data, feeding back its OWN
         allocations.
 
@@ -189,6 +190,25 @@ class Actor(L.LightningModule):
         base class because this is how BOTH actors have to be *evaluated*: at
         deployment there is no oracle allocation to condition on. ActorAR
         differs only in that it also *trains* through this loop.
+
+        The world model's contribution is computed ONCE, not once per step. An
+        allocation does not move the market, so Z_hat and the predicted return
+        distribution do not depend on the policy at all, and row j of a single
+        teacher-forced pass is the prediction made from the prefix Z[:j+1] --
+        exactly what the step-t loop used to recompute on a growing prefix.
+        Identical values, O(S) times less work. The incremental path is kept for
+        the case where the sequence outruns the predictor's context, which is
+        the only case where truncation makes the two differ.
+
+        detach_actions=False leaves the fed-back allocation on the graph so a
+        gradient can flow from a later reward into an earlier action. Only the
+        analytic RL objective wants that; behaviour cloning does not.
+
+        Returns a dict: `logits`, `action`, `action_idx`, `steps`, the
+        conditioning path the policy actually saw (`act_path`), and the
+        world-model tensors (`Z_hat`, `ret_probs`) when the one-pass route was
+        taken -- the RL update replays that path in one parallel forward rather
+        than re-running this loop.
         """
         assert ctx_len >= 1, 'need at least one window of context to predict from'
         X, Ret = batch['sample'], batch['return']
@@ -199,38 +219,64 @@ class Actor(L.LightningModule):
         max_steps = S - ctx_len
         pred_steps = max_steps if pred_steps is None else min(pred_steps, max_steps)
 
-        Z_p = Z[:, :ctx_len]
-        Ret_p = Ret[:, :ctx_len]
+        # `one_pass` is auto-selected; the explicit override exists so the
+        # smoke test can check the two paths against each other.
+        if one_pass is None:
+            one_pass = S <= self.jepa.predictor.max_len
+        Z_hat = ret_probs = None
+        if one_pass:
+            with torch.no_grad():
+                Z_hat, ret_logits = self.jepa.predict(Z[:, :-1], Ret[:, :-1])
+                ret_probs = torch.softmax(ret_logits, dim=-1)
+        else:
+            Z_p, Ret_p = Z[:, :ctx_len], Ret[:, :ctx_len]
+
         # Flat before the policy takes over, matching the act0 = 0 that
         # _equity_bundle prepends when it charges commission on turnover.
-        Act_p = torch.zeros_like(Ret_p)
+        Act_p = torch.zeros((B, ctx_len, 1), device=Z.device, dtype=Z.dtype)
 
         action_logits, actions, action_idx = [], [], []
 
         for t in range(pred_steps):
-            with torch.no_grad():
-                Zp1, Ret_logits = self.jepa.predict(Z_p, Ret_p)
-                Ret_probs = torch.softmax(Ret_logits, dim=-1)
+            n = ctx_len + t
+            if one_pass:
+                Z_in, cond_ret, Act_ctx = Z_hat[:, :n], ret_probs[:, :n], Act_p
+            else:
+                with torch.no_grad():
+                    Z_in, rl_t = self.jepa.predict(Z_p, Ret_p)
+                    cond_ret = torch.softmax(rl_t, dim=-1)
+                # The predictor may have truncated; align the action history to
+                # whatever length came back.
+                Act_ctx = Act_p[:, n - Z_in.size(1):]
 
-            cond = torch.cat((Ret_probs, Act_p), dim=-1)
-            logits = self(Zp1, cond)[:, -1:, :]
+            # Truncate all three together. The backbone would do it internally,
+            # but slicing here keeps the graph off the discarded prefix.
+            lo = max(0, Z_in.size(1) - self.backbone.max_len)
+            cond = torch.cat((cond_ret[:, lo:], Act_ctx[:, lo:]), dim=-1)
+            logits = self(Z_in[:, lo:], cond)[:, -1:, :]
 
-            # Detached: the fed-back action is a conditioning input, not a path
-            # gradients should flow along. new_act is [B, 1, 1] so it can be
-            # concatenated onto the time axis of Act_p.
-            probs = torch.softmax(logits.detach() / act_temp, dim=-1)
+            src = logits if not detach_actions else logits.detach()
+            probs = torch.softmax(src / act_temp, dim=-1)
             new_act, new_idx = self.decode_actions(probs, decode)
 
-            Z_p = truncate(torch.cat([Z_p, Z[:, ctx_len + t:ctx_len + t + 1]], dim=1), self.backbone.max_len)
-            Ret_p = truncate(torch.cat([Ret_p, Ret[:, ctx_len + t:ctx_len + t + 1]], dim=1), self.backbone.max_len)
-            Act_p = truncate(torch.cat([Act_p, new_act], dim=1), self.backbone.max_len)
+            Act_p = torch.cat([Act_p, new_act], dim=1)
+            if not one_pass:
+                Z_p = truncate(torch.cat([Z_p, Z[:, n:n + 1]], dim=1), self.jepa.predictor.max_len)
+                Ret_p = truncate(torch.cat([Ret_p, Ret[:, n:n + 1]], dim=1), self.jepa.predictor.max_len)
 
             action_logits.append(logits)
             actions.append(new_act)
             action_idx.append(new_idx)
 
-        return (torch.cat(action_logits, dim=1), torch.cat(actions, dim=1),
-                torch.cat(action_idx, dim=1), pred_steps)
+        return {
+            'logits': torch.cat(action_logits, dim=1),
+            'action': torch.cat(actions, dim=1),
+            'action_idx': torch.cat(action_idx, dim=1),
+            'steps': pred_steps,
+            'act_path': Act_p[:, :ctx_len + pred_steps - 1],
+            'Z_hat': Z_hat,
+            'ret_probs': ret_probs,
+        }
 
     def backtest(self, batch, act_temp=1.0, decode='expected',
                  teacher_force=False, ctx_len=None, pred_steps=None):
@@ -257,10 +303,15 @@ class Actor(L.LightningModule):
         ctx_len = self.eval_ctx_len if ctx_len is None else ctx_len
         pred_steps = self.eval_pred_steps if pred_steps is None else pred_steps
 
-        _, _, Ret_probs = self.world_state(batch)
-        logits, actions, act_idx, steps = self.rollout(
-            batch, ctx_len, pred_steps, act_temp=act_temp, decode=decode
-        )
+        r = self.rollout(batch, ctx_len, pred_steps, act_temp=act_temp, decode=decode)
+        logits, actions, act_idx, steps = (
+            r['logits'], r['action'], r['action_idx'], r['steps'])
+
+        # rollout already ran the teacher-forced world-model pass; only the
+        # incremental fallback leaves it unavailable.
+        Ret_probs = r['ret_probs']
+        if Ret_probs is None:
+            _, _, Ret_probs = self.world_state(batch)
 
         lo, hi = ctx_len, ctx_len + steps
         Act_out = batch['action'][:, lo:hi]
@@ -360,7 +411,8 @@ class ActorAR(Actor):
         self.pred_steps = cfg['actor']['ar']['pred_steps']
 
     def _shared_step(self, batch, stage):
-        logits, _, _, steps = self.rollout(batch, self.ctx_len, self.pred_steps)
+        r = self.rollout(batch, self.ctx_len, self.pred_steps)
+        logits, steps = r['logits'], r['steps']
         act_target = batch['action_target'][:, self.ctx_len:self.ctx_len + steps]
 
         L = self.CrossEntropyLoss(

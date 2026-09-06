@@ -26,6 +26,7 @@ import viz
 from actor import Actor, ActorAR
 from data import CryptoDataset
 from jepa import JEPA
+from rl import ActorRL
 from metrics import STEPS_PER_YEAR, format_table, max_drawdown, summarize
 from util import set_logger
 from viz import plt
@@ -204,6 +205,7 @@ def plot_sequence(b, i, cfg, path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--ar', action='store_true', help='Evaluate the autoregressive fine-tune.')
+    parser.add_argument('--rl', action='store_true', help='Evaluate the RL stage-3 policy.')
     parser.add_argument('--ckpt', default='best', choices=['best', 'last'])
     parser.add_argument('--decode', default='expected', choices=['expected', 'argmax', 'sample'])
     parser.add_argument('--teacher-force', action='store_true',
@@ -225,8 +227,14 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     jepa = JEPA.load_from_checkpoint(f"./models/{cfg['jepa']['name']}/best.ckpt", cfg=cfg)
 
-    cls = ActorAR if args.ar else Actor
-    name = cfg['actor']['name'] + ('-AR' if args.ar else '')
+    if args.ar and args.rl:
+        parser.error('--ar and --rl select different checkpoints; pick one.')
+    if args.rl:
+        cls, name = ActorRL, cfg['rl']['name']
+    elif args.ar:
+        cls, name = ActorAR, cfg['actor']['name'] + '-AR'
+    else:
+        cls, name = Actor, cfg['actor']['name']
     model = cls.load_from_checkpoint(f'./models/{name}/{args.ckpt}.ckpt', cfg=cfg, jepa=jepa)
     model.eval().to(device)
 
