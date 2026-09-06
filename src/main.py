@@ -124,7 +124,7 @@ def train_actor(cfg, resume=False):
 
     trainer, ckpt_path = build_trainer(
         cfg, tcfg, cfg['actor']['name'], f"./models/{cfg['actor']['name']}",
-        monitor='val/mean_eq', mode='max', resume=resume,
+        monitor='val/actor_loss', mode='min', resume=resume,
     )
     trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
 

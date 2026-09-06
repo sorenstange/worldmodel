@@ -130,12 +130,35 @@ def loss_fn_eq(x, p, c):
 def loss_fn_so(x, p, c):
     dE = delta_equity(x, p, c)
 
-    # Downside deviation is measured against the target return (here 0 excess,
+    # Maske for negative værdier [B, seq_len]
+    neg_mask = (dE < 0).float()
+    neg_dE = dE * neg_mask
+    
+    # Antal negative elementer per batch
+    n_neg = torch.sum(neg_mask, dim=-1, keepdim=True)
+    
+    # Gennemsnit af de negative værdier per batch
+    mean_neg = torch.sum(neg_dE, dim=-1, keepdim=True) / (n_neg + 1e-6)
+    
+    # Kvadreret afvigelse (kun for de negative elementer)
+    sq_deviation = (neg_dE - mean_neg) ** 2 * neg_mask
+    
+    # Downside varians og standardafvigelse per batch
+    variance = torch.sum(sq_deviation, dim=-1) / torch.clamp(n_neg.squeeze(-1) - 1, min=1)
+    downside_std = torch.sqrt(variance + 1e-6)
+    
+    # Hvis en batch har <= 1 negativ værdi, sæt downside_std til 0
+    downside_std = torch.where(n_neg.squeeze(-1) > 1, downside_std, torch.zeros_like(downside_std))
+        
+    # Beregn Sortino ratio per trajectory
+    sortino = torch.mean(dE, dim=-1) / (downside_std + 1e-6)
+
+    '''# Downside deviation is measured against the target return (here 0 excess,
     # i.e. dE == 1), not against the mean of the negative values.
     shortfall = torch.clamp(1.0 - dE, min=0.0)
     downside_std = torch.sqrt(torch.mean(shortfall ** 2, dim=-1) + 1e-12)
 
-    sortino = (torch.mean(dE, dim=-1) - 1.0) / (downside_std + 1e-6)
+    sortino = (torch.mean(dE, dim=-1) - 1.0) / (downside_std + 1e-6)'''
 
     return -torch.sum(sortino)
 

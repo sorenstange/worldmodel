@@ -34,9 +34,9 @@ data:
     min_value: -1.0
     max_value: 1.0
     commission_value: 0.0005   # 5 bps, charged on |change in allocation|
-    loss_fn: 'equity'          # oracle objective: 'equity' | 'sortino' | 'sharpe' (see util.LOSS_FNS)
+    loss_fn: 'sortino'          # oracle objective: 'equity' | 'sortino' | 'sharpe' (see util.LOSS_FNS)
     constrained: true          # apply the turnover penalty below on top of loss_fn
-    max_change: 0.25            # oracle turnover constraint, per 15m step
+    max_change: 0.2            # oracle turnover constraint, per 15m step
     penalty_weight: 1000.0
     opt_steps: 1000
     opt_lr: 0.01
@@ -107,9 +107,9 @@ actor:
     max_value: ${data.actions.max_value}
     dropout: 0.1
   ar:
-    ctx_len: 8         # 2h of real context before the policy takes over
-    pred_steps: 16     # each step is a sequential backbone pass held for backprop
-    batch_size: 32     # ...so this must be far below the teacher-forced batch
+    ctx_len: 1         # 2h of real context before the policy takes over
+    pred_steps: 32     # each step is a sequential backbone pass held for backprop
+    batch_size: 256     # ...so this must be far below the teacher-forced batch
   eval:
     # Shared by Actor and ActorAR so the two are scored identically.
     ctx_len: 1         # >= 1; the policy self-feeds from the first step, flat
