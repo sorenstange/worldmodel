@@ -109,6 +109,37 @@ class ActorRL(Actor):
         self.gae_lambda = rcfg['gae_lambda']
 
         rw = rcfg['reward']
+        # Rewards are log growth expressed in BASIS POINTS. Log growth over a
+        # 15m window is O(1e-4), so at scale 1.0 every shaping coefficient here
+        # -- and the KL and entropy terms further down -- sits orders of
+        # magnitude above the objective it is supposed to regularise. In bps the
+        # per-step reward is O(0.3) in the mean and O(40) in the spread, and a
+        # coefficient of 1.0 means roughly what it looks like it means.
+        self.reward_scale = rw.get('scale', 1e4)
+
+        # (A) Unconditional drift removal. Without it the training split's drift
+        # IS the objective: the measured Kelly fraction mu/sigma^2 over
+        # [data.training_interval] is 1.08, which the [-1, 1] box clips to +1,
+        # so "always fully long" is the exact argmax of undiscounted log equity.
+        # It is -1.60 over [data.test_interval], where the drift changes sign,
+        # so a policy that has learned the drift is anti-fitted to the test set.
+        # Subtracting a running mean of the realised window return makes a
+        # CONSTANT allocation earn ~0 and leaves only timing to be paid for.
+        self.demean = rw.get('demean', 'ema')
+        assert self.demean in ('none', 'ema', 'const'), self.demean
+        self.drift_beta = rw.get('drift_beta', 0.99)
+        self.drift_const = rw.get('drift', 0.0) or 0.0
+
+        # (B) Benchmark. 'bh' scores log(dE / dE_buy_and_hold), so an episode
+        # return is log(E_actor / E_bh) -- the primary definition of done -- and
+        # buy-and-hold scores exactly 0 instead of winning. For PPO this is the
+        # baseline the critic cannot supply, since true V really is ~0 here.
+        # It does NOT move the analytic-logeq optimum: dividing by a path the
+        # actions do not enter is a constant offset in log space. Drift removal
+        # is what moves that one. The two are complementary, not alternatives.
+        self.benchmark = rw.get('benchmark', 'bh')
+        assert self.benchmark in ('none', 'bh'), self.benchmark
+
         self.downside_coef = rw.get('downside_coef', 0.0)
         self.reward_max_change = rw.get('max_change', None)
         self.turnover_penalty = rw.get('turnover_penalty', 0.0)
@@ -119,11 +150,18 @@ class ActorRL(Actor):
         self.minibatch = p['minibatch']
         self.vf_coef = p['vf_coef']
         self.norm_adv = p.get('norm_adv', True)
+        self.center_adv = p.get('center_adv', True)
         self.target_kl = p.get('target_kl', None)
 
         a = rcfg['analytic']
         self.analytic_objective = a.get('objective', 'logeq')
         assert self.analytic_objective in ('logeq', 'sortino'), self.analytic_objective
+        # 'logeq' is per-step basis points, O(0.3); 'sortino' is a dimensionless
+        # per-step ratio, O(0.01) on this data. They are two orders of magnitude
+        # apart, so switching between them means re-scaling the KL and entropy
+        # coefficients with them -- obj_scale is the knob for doing that in one
+        # place rather than in three.
+        self.obj_scale = a.get('obj_scale', 1.0)
 
         # Entropy / reference-KL coefficients are per-objective: PPO needs a
         # live entropy term to keep sampling alive, while the analytic path is
@@ -179,6 +217,16 @@ class ActorRL(Actor):
         self.sched_steps = tcfg.get('sched_steps', None)
 
         self.register_buffer('updates', torch.zeros((), dtype=torch.long))
+        # Running estimates: the unconditional drift (A) and the spread of the
+        # GAE target (D). Buffers, so --resume continues with a warmed-up
+        # estimate instead of re-learning it from a cold start. The paired
+        # `_init` flags let the first batch seed them directly -- an EMA at
+        # beta = 0.99 started from zero takes hundreds of steps to catch a
+        # quantity as small as 3e-5.
+        self.register_buffer('drift_ema', torch.zeros(()))
+        self.register_buffer('drift_init', torch.zeros((), dtype=torch.long))
+        self.register_buffer('ret_std', torch.ones(()))
+        self.register_buffer('ret_init', torch.zeros((), dtype=torch.long))
 
     # ------------------------------------------------------------------
     # Setup
@@ -324,29 +372,103 @@ class ActorRL(Actor):
     # Reward
     # ------------------------------------------------------------------
 
-    def _rewards(self, actions, p):
-        """Per-step log growth, plus optional risk / turnover shaping.
+    def _drift(self, p):
+        """Current estimate of the unconditional per-window drift.
 
-        The sum over an episode is log terminal equity, which is why gamma = 1
-        is correct here rather than a hyperparameter: the undiscounted return
-        *is* the objective in the definition of done. The path is built with the
-        same leading flat position `_equity_bundle` prepends, so the reward and
-        the backtest charge commission on identical turnover.
+        Estimated from the training stream only and applied only to the training
+        REWARD -- `backtest`, and so every reported number, still runs on real
+        returns in real units. This is reward shaping, not a look-ahead: nothing
+        about the validation or test split enters the estimate.
+        """
+        if self.demean == 'none':
+            return torch.zeros((), device=p.device, dtype=p.dtype)
+        if self.demean == 'const':
+            return torch.full((), self.drift_const, device=p.device, dtype=p.dtype)
+
+        with torch.no_grad():
+            m = p.mean().to(self.drift_ema.dtype)
+            if int(self.drift_init) == 0:
+                self.drift_ema.fill_(m)
+                self.drift_init.fill_(1)
+            # The PRE-update estimate is the one that gets used. Demeaning with
+            # the current batch's own mean would strip the part of the drift the
+            # policy could actually have predicted, not just the unconditional
+            # part -- it would remove the signal along with the bias.
+            cur = self.drift_ema.clone()
+            if self.training:
+                self.drift_ema.mul_(self.drift_beta).add_(m * (1.0 - self.drift_beta))
+        return cur.to(device=p.device, dtype=p.dtype)
+
+    def _rewards(self, actions, p):
+        """Per-step reward in basis points of log growth, plus shaping.
+
+        Returns `(rewards, dE_obj, dE_raw)`.
+
+        `dE_raw` is the real, unshaped growth factor -- what the account would
+        actually have earned -- and is what the episode logs report, so the
+        shaping never leaks into a number anyone reads as a result. `dE_obj` is
+        the shaped path the objective is built on: drift-removed (A) and, under
+        `[rl.reward.benchmark] = 'bh'`, expressed relative to buy-and-hold (B).
+
+        The sum of `rewards` over an episode is `[rl.reward.scale]` times log
+        terminal equity -- log RELATIVE equity under the 'bh' benchmark -- which
+        is why gamma = 1 is correct here rather than a hyperparameter. The path
+        is built with the same leading flat position `_equity_bundle` prepends,
+        so the reward and the backtest charge commission on identical turnover.
         """
         B = actions.size(0)
         a0 = torch.zeros((B, 1), device=actions.device, dtype=actions.dtype)
         x = torch.cat([a0, actions.squeeze(-1)], dim=1)               # [B, T+1]
-        dE = delta_equity(x, p, self.commission)                      # [B, T]
-        r = torch.log(dE.clamp_min(1e-6))
 
+        dE_raw = delta_equity(x, p, self.commission)                  # [B, T]
+        p_eff = p - self._drift(p)
+        dE = delta_equity(x, p_eff, self.commission)
+
+        if self.benchmark == 'bh':
+            # Fully long from the first step, so it pays commission exactly once
+            # -- identical to the buy-and-hold leg of `_equity_bundle`, which is
+            # what `val/excess_eq` is measured against.
+            bh = torch.cat([a0, torch.ones_like(x[:, 1:])], dim=1)
+            dE = dE / delta_equity(bh, p_eff, self.commission).clamp_min(1e-6)
+
+        r = self.reward_scale * torch.log(dE.clamp_min(1e-6))
+
+        # Both shaping terms are LINEAR in the reward's own units. A quadratic
+        # cannot be made scale-coherent here -- squaring a bps quantity leaves
+        # the coefficient carrying the units, which is how the old defaults came
+        # to be off by three to six orders of magnitude.
         if self.downside_coef > 0:
-            # Additive, so the return stays decomposable per step, while
-            # pushing on the Sortino half of the definition of done.
-            r = r - self.downside_coef * torch.relu(-r) ** 2
+            # Loss aversion: 1.0 makes a basis point lost count twice as much as
+            # a basis point gained. Additive, so the return stays decomposable
+            # per step, while pushing on the Sortino half of the definition of
+            # done.
+            r = r - self.downside_coef * torch.relu(-r)
         if self.reward_max_change is not None and self.turnover_penalty > 0:
+            # Extra basis points charged per unit of allocation change beyond
+            # the cap -- the same units as [data.actions.commission_value],
+            # which is 5 bps.
             excess = torch.relu(torch.abs(torch.diff(x, dim=-1)) - self.reward_max_change)
-            r = r - self.turnover_penalty * excess ** 2
-        return r, dE
+            r = r - self.turnover_penalty * excess
+        return r, dE, dE_raw
+
+    def _update_ret_std(self, ret_tgt):
+        """Track the spread of the GAE target so the critic stays O(1).
+
+        The value target is log growth in bps summed over the episode: O(200) on
+        this data. An MSE against that is not on speaking terms with a clipped
+        surrogate of O(1), so `vf_coef` cannot be set sensibly for both. The
+        critic therefore predicts `ret_tgt / ret_std` and `_score` multiplies the
+        scale back in, leaving GAE and the reward in one consistent unit.
+        """
+        if not self.training:
+            return
+        with torch.no_grad():
+            s = ret_tgt.std().clamp_min(1e-8).to(self.ret_std.dtype)
+            if int(self.ret_init) == 0:
+                self.ret_std.fill_(s)
+                self.ret_init.fill_(1)
+            else:
+                self.ret_std.mul_(self.drift_beta).add_(s * (1.0 - self.drift_beta))
 
     def _gae(self, rewards, values):
         T = rewards.size(1)
@@ -387,12 +509,19 @@ class ActorRL(Actor):
         return Z_in, cond, steps
 
     def _score(self, Z_in, cond, steps):
+        """Action logits and the critic's NORMALISED value.
+
+        The second return is in units of `ret_std`, not of the reward -- see
+        `_update_ret_std`. Callers multiply by `ret_std` to put it back on the
+        reward's scale for GAE, and train the head against the normalised
+        target. Zero-init still means an exact zero value at step 0.
+        """
         h = self.backbone(Z_in, cond)
         lo = self.rl_ctx_len - 1
         h = h[:, lo:lo + steps]
         logits = self.actor_head(h)
-        values = self.critic_head(h.detach() if self.detach_trunk else h).squeeze(-1)
-        return logits, values
+        v_norm = self.critic_head(h.detach() if self.detach_trunk else h).squeeze(-1)
+        return logits, v_norm
 
     def _ref_logits(self, Z_in, cond, steps):
         with torch.no_grad():
@@ -427,19 +556,33 @@ class ActorRL(Actor):
         if sch is not None:
             sch.step()
 
-    def _log_episode(self, actions, dE, tag='rl'):
+    def _log_episode(self, actions, dE_raw, dE_obj=None, tag='rl'):
+        """Episode diagnostics, reported on the REAL growth path.
+
+        `dE_raw` is unshaped, so end_equity and sortino here stay comparable to
+        the backtest no matter what the reward is doing. `mean_alloc` is the
+        collapse detector: a policy that has gone all-in long reads mean_alloc
+        ~ +1, abs_alloc ~ 1 and turnover ~ 0.
+        """
         with torch.no_grad():
-            eq = dE.clamp_min(1e-6).log().sum(dim=-1).exp()
+            eq = dE_raw.clamp_min(1e-6).log().sum(dim=-1).exp()
             a = actions.squeeze(-1)
             turn = (torch.abs(torch.diff(a, dim=-1)).mean() if a.size(1) > 1
                     else torch.zeros((), device=a.device))
-            self.log_dict({
+            d = {
                 f'{tag}/end_equity': eq.mean(),
-                f'{tag}/sortino': sortino_ratio(dE).mean(),
+                f'{tag}/sortino': sortino_ratio(dE_raw).mean(),
                 f'{tag}/turnover': turn,
                 f'{tag}/mean_alloc': a.mean(),
                 f'{tag}/abs_alloc': a.abs().mean(),
-            }, on_step=True, on_epoch=False)
+                f'{tag}/drift_ema': self.drift_ema,
+            }
+            if dE_obj is not None:
+                # Under the 'bh' benchmark this is equity RELATIVE to
+                # buy-and-hold, so 1.0 means the policy exactly matched it.
+                d[f'{tag}/obj_equity'] = (
+                    dE_obj.clamp_min(1e-6).log().sum(dim=-1).exp().mean())
+            self.log_dict(d, on_step=True, on_epoch=False)
 
     def _ppo_step(self, batch):
         opt = self.optimizers()
@@ -449,7 +592,7 @@ class ActorRL(Actor):
             roll = self._rollout(batch, decode='sample', detach_actions=True, dream=dream)
             actions, act_idx = roll['action'], roll['action_idx']
             p = self._realised(batch, roll, dream)
-            rewards, dE = self._rewards(actions, p)
+            rewards, dE, dE_raw = self._rewards(actions, p)
 
             Z_in, cond, steps = self._replay_inputs(roll)
             # The collection logits ARE the behaviour policy's logits (dropout
@@ -457,12 +600,29 @@ class ActorRL(Actor):
             old_logp = torch.log_softmax(roll['logits'], dim=-1).gather(
                 -1, act_idx.long()).squeeze(-1)
 
-            _, values = self._score(Z_in, cond, steps)
+            _, v_norm = self._score(Z_in, cond, steps)
+            values = v_norm * self.ret_std
             adv, ret_tgt = self._gae(rewards, values)
+
+            # (E) Centre the advantage per timestep across the batch. The critic
+            # is zero-initialised and true V really is ~0 here, so it supplies
+            # almost no baseline; the batch mean at each t is a free time-varying
+            # one that removes the systematic component of the reward the action
+            # had no say in -- the entry commission everyone pays at t = 0, and
+            # whatever drift the EMA in (A) has not caught up with. It is biased
+            # by the sample's own O(1/B) contribution, which is negligible at
+            # [rl.training.batch_size] and worth it for the variance.
+            if self.center_adv and adv.size(0) > 1:
+                adv = adv - adv.mean(dim=0, keepdim=True)
+
+            # Keep the critic's target O(1) whatever [rl.reward.scale] is.
+            self._update_ret_std(ret_tgt)
+            v_tgt = ret_tgt / self.ret_std
+
             ref_logits = (self._ref_logits(Z_in, cond, steps)
                           if self.ref_backbone is not None else None)
 
-        self._log_episode(actions, dE)
+        self._log_episode(actions, dE_raw, dE)
 
         B = Z_in.size(0)
         mb_size = self.minibatch or B
@@ -483,7 +643,8 @@ class ActorRL(Actor):
 
                 pg = -torch.min(ratio * a,
                                 ratio.clamp(1 - self.ppo_clip, 1 + self.ppo_clip) * a).mean()
-                vf = F.mse_loss(v, ret_tgt[mb])
+                # Both sides normalised, so this is O(1) and vf_coef is legible.
+                vf = F.mse_loss(v, v_tgt[mb])
                 ent = self._entropy(logits)
                 kl = (self._kl(logits, ref_logits[mb])
                       if ref_logits is not None else torch.zeros((), device=logits.device))
@@ -518,6 +679,7 @@ class ActorRL(Actor):
             'rl/clipfrac': clipfrac,
             'rl/adv_std': adv.std(),
             'rl/value_mean': values.mean(),
+            'rl/ret_std': self.ret_std,
             'rl/reward': rewards.mean(),
             'rl/dream': float(dream),
         }, on_step=True, on_epoch=False)
@@ -536,12 +698,18 @@ class ActorRL(Actor):
         roll = self._rollout(batch, decode='expected', detach_actions=False, dream=dream)
         actions = roll['action']
         p = self._realised(batch, roll, dream)
-        rewards, dE = self._rewards(actions, p)
+        rewards, dE, dE_raw = self._rewards(actions, p)
 
         if self.analytic_objective == 'sortino':
+            # On the SHAPED path, so this is a Sortino on excess growth when the
+            # benchmark is on. Dimensionless and per-step: O(0.01) here.
             obj = sortino_ratio(dE)
         else:
-            obj = rewards.sum(dim=1)          # log terminal equity
+            # Mean, not sum: log terminal equity per step, in basis points, so
+            # the objective does not silently change scale with [rl.pred_steps]
+            # and the KL coefficient below stays meaningful across horizons.
+            obj = rewards.mean(dim=1)
+        obj = self.obj_scale * obj
         loss = -obj.mean()
 
         logits = roll['logits']
@@ -562,9 +730,10 @@ class ActorRL(Actor):
         opt.step()
         self.updates += 1
 
-        self._log_episode(actions.detach(), dE.detach())
+        self._log_episode(actions.detach(), dE_raw.detach(), dE.detach())
         self.log_dict({
             'rl/analytic_loss': loss.detach(),
+            'rl/analytic_obj': obj.detach().mean(),
             'rl/entropy': ent.detach(),
             'rl/kl_ref': kl.detach(),
             'rl/reward': rewards.detach().mean(),
@@ -592,16 +761,28 @@ class ActorRL(Actor):
             torch.cat([torch.zeros_like(a[:, :1]), a], dim=1),
             b['return_raw'].squeeze(-1), self.commission)
 
+        e = b['end_equity'].clamp_min(1e-6)
+        bh = b['bh_end_equity'].clamp_min(1e-6)
+
         self.log_dict({
-            'val/mean_eq': b['end_equity'].mean(),
+            'val/mean_eq': e.mean(),
             'val/opt_eq': b['opt_end_equity'].mean(),
-            'val/bh_eq': b['bh_end_equity'].mean(),
+            'val/bh_eq': bh.mean(),
+            # (C) The checkpoint and early-stopping monitor. mean_eq cannot
+            # separate skill from drift: a policy that outputs +1 everywhere IS
+            # buy-and-hold and scores exactly bh_eq, so selecting on mean_eq
+            # rewards the collapse it is supposed to catch. This is
+            # log(E_actor / E_bh) -- 0 for that policy, positive only for timing
+            # -- which is what the definition of done actually asks for.
+            'val/excess_eq': (e.log() - bh.log()).mean(),
             # A flat policy never trades and never earns: exactly 1.0. Logged
             # because the definition of done names it as a baseline.
             'val/flat_eq': torch.ones((), device=a.device),
             'val/sortino': sortino_ratio(dE).mean(),
             'val/win_rate': (b['end_equity'] > 1.0).float().mean(),
             'val/turnover': torch.abs(torch.diff(a, dim=-1)).mean(),
+            # The collapse detector: +1 means the policy has become long-only.
+            'val/mean_alloc': a.mean(),
             'val/abs_alloc': a.abs().mean(),
             'val/bc_ce': bc_ce,
         }, on_step=False, on_epoch=True, prog_bar=True)

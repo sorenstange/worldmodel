@@ -229,9 +229,11 @@ generic RL setup:
    - **Credit assignment is two steps deep.** `a_t` enters `r_t` and, through
      `c|a_{t+1} - a_t|`, `r_{t+1}`; beyond that it acts only via the policy's own later
      choices. GAE at `lambda ~ 0.95` over 64 steps therefore pours in market noise that
-     `a_t` had no influence over, which is why `[rl.gae_lambda]` defaults to **0.5**,
+     `a_t` had no influence over, which is why `[rl.gae_lambda]` defaults to **0.0**,
      not the usual value. `[rl.gamma]` is **1.0** and is not a tuning knob: the
      undiscounted sum of per-step log growth *is* log terminal equity.
+     `[rl.ppo.center_adv]` subtracts the batch mean at each timestep, a free
+     time-varying baseline the zero-initialised critic cannot supply.
 3. **Collection is sequential; the update is not.** The policy's only autoregressive
    input is its previous allocation, and during the update that path is stored data —
    so re-scoring a whole episode is ONE teacher-forced pass, not T recurrent ones
@@ -252,13 +254,49 @@ generic RL setup:
   variables. `[rl.analytic.objective]` picks log-equity or Sortino. It is a direct
   policy search, so expect it to overfit the training split harder than PPO.
 
-**The load-bearing regulariser is `[rl.*.kl_coef]`, not the entropy bonus.** Entropy
+#### The reward is shaped, and that is what stops the buy-and-hold collapse
+
+The first RL run collapsed to always-long. That was not a bug — it was the correct
+answer to the question being asked. `sum_t log dE_t` over the training split is
+maximised by a *constant* allocation of about **+0.85** (measured by sweeping constant
+`a` on real BTC 15m windows; the Kelly fraction `mu/sigma^2` is 1.08 before costs, which
+the `[-1, 1]` box clips). Measured drift per 15m window is **+0.325 bp on train, +0.045
+bp on val, −0.171 bp on test** — so the sign *flips* out of sample, and a policy that
+learned the drift is anti-fitted to the test split. Three settings in `[rl.reward]`
+address this, and they are not interchangeable:
+
+- **`scale`** = 10000: rewards are log growth in **basis points**. Raw log growth is
+  O(1e-4), so at scale 1.0 every coefficient below, plus `kl_coef` and `ent_coef`, sat
+  orders of magnitude above the objective it was meant to regularise. (`analytic.kl_coef`
+  of 0.02 against an objective of O(1e-3) was ~20x the whole objective — that run could
+  not move.) The two shaping terms are now **linear** in those units: `downside_coef`
+  = 1.0 makes a bp lost count twice a bp gained; `turnover_penalty` is extra bps per unit
+  of change beyond `max_change`, the same units as `[data.actions.commission_value]`.
+  A quadratic cannot be scale-coherent here — squaring a bps quantity leaves the
+  coefficient carrying the units.
+- **`demean`** = `'ema'`: subtract a running mean of the realised window return before
+  computing the reward, so a *constant* allocation earns ~0 and only timing pays. This is
+  the setting that moves the argmax; with it the best constant `a` is **0.00 on both
+  train and test**. The estimate is built from the training stream and applied only to
+  the training reward — `backtest`, and every reported number, still runs on real returns
+  in real units, so this is shaping, not look-ahead.
+- **`benchmark`** = `'bh'`: score `log(dE / dE_bh)`, so an episode return is
+  `log(E_actor / E_bh)` — the primary definition of done — and buy-and-hold scores
+  *exactly* 0 rather than winning. This is the baseline PPO's critic cannot supply, since
+  true `V` really is ~0 here. It does **not** move the analytic-logeq optimum: dividing by
+  a path the actions do not enter is a constant offset in log space. Use both.
+
+`smoke_test.py` pins all three: the unshaped reward still sums to log terminal equity,
+`dE_raw` still reproduces the backtest path exactly, always-long scores exactly zero
+under the benchmark, and demeaning neutralises a constant allocation on a trending
+stream.
+
+**The other load-bearing regulariser is `[rl.*.kl_coef]`, not the entropy bonus.** Entropy
 over 51 *ordered* bins pulls toward uniform on [-1, 1], a nonsense prior for an
 allocation. The KL is measured against a frozen copy of the behaviour-cloned policy —
-a risk-aware prior distilled from the Sortino oracle — and is what stops a run
-collapsing onto the attractor RL loves here: all-in long, because the training split
-trends up. The reference lives in the state dict (so `--resume` keeps it) and is pinned
-by `sync_reference()` at launch, guarded by the `ref_synced` buffer.
+a risk-aware prior distilled from the Sortino oracle. The reference lives in the state
+dict (so `--resume` keeps it) and is pinned by `sync_reference()` at launch, guarded by
+the `ref_synced` buffer.
 
 `[rl.disable_dropout]` is on by default: PPO's ratio is a trust region only if
 collection and update see the same network, and dropout makes `new_logp != old_logp`
@@ -266,7 +304,11 @@ at epoch 0 for identical weights.
 
 Evaluation is `Actor.backtest`, inherited **unchanged**, so the RL policy is scored on
 the same honest autoregressive rollout over the same `[actor.eval]` span as `Actor` and
-`ActorAR`. `val/mean_eq` stays the checkpoint and early-stopping monitor. `val/bc_ce`
+`ActorAR`. **`val/excess_eq` — mean `log(E_actor / E_bh)` — is the checkpoint and
+early-stopping monitor** for both `ActorAR` and `ActorRL`. `val/mean_eq` is still logged
+but must not be selected on: a policy that outputs +1 everywhere *is* buy-and-hold and
+scores exactly `val/bh_eq`, so selecting on raw equity rewards the collapse it is
+supposed to catch. `val/mean_alloc` is the collapse detector — read it first. `val/bc_ce`
 logs cross-entropy against the oracle as a *drift* diagnostic — it is expected to get
 worse if RL is finding anything the clairvoyant labels do not contain.
 
@@ -397,6 +439,13 @@ values:
 | `warmup` | epochs-derived | explicit steps | the old expression was warmup-in-epoch-units scaled by total steps |
 | head dropout (2nd layer) | `2*dropout` = 0.2 | `dropout` | looked like a copy-paste of the neighbouring `2*d_model` |
 | `eval_stride` | (none) | 64 | val/test windows are now disjoint |
+| `rl.reward.scale` | (none) | 1e4 | rewards in bps; at 1.0 every shaping/KL coefficient was orders of magnitude off the objective |
+| `rl.reward.demean` | (none) | `'ema'` | constant-long was the exact argmax of the training objective — see *The reward is shaped* |
+| `rl.reward.benchmark` | (none) | `'bh'` | the episode return is now `log(E/E_bh)`, i.e. the definition of done, and PPO's missing baseline |
+| `rl.gae_lambda` | 0.5 | 0.0 | credit is two steps deep; anything longer is market noise the action had no say in |
+| `rl.ppo.center_adv` | (none) | true | per-timestep batch baseline; the zero-init critic supplies none |
+| `rl.analytic.kl_coef` | 0.02 | 1.0 | was ~20x the entire objective at the old reward scale |
+| RL monitor | `val/mean_eq` | `val/excess_eq` | raw equity cannot separate skill from drift; a long-only policy maximises it by construction |
 
 Still worth sweeping: `d_model` and depth (the above is a guess, not a measurement);
 `lam_rollout` and `rollout_steps`; `lam_SIGReg`; the +-5 sigma bin range (16 of 61 bins
@@ -404,7 +453,7 @@ carry >1% of mass, so non-uniform or quantile bins are an option — note `util.
 already exists and is unused); `max_change` and the oracle's turnover penalty.
 
 For stage 3, nothing is tuned at all. The knobs most likely to matter, in order:
-`[rl.gae_lambda]` (the argument above says short; 0.0—0.95 is the range worth
+`[rl.gae_lambda]` (the argument above says short; 0.0—0.3 is the range worth
 measuring), `[rl.ppo.kl_coef]` (too low and the policy degenerates, too high and it
 never leaves the clone), `[rl.training.lr]`, `[rl.objective]` itself, and
 `[rl.reward.downside_coef]` if the Sortino side of the definition of done lags.

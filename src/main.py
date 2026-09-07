@@ -149,7 +149,10 @@ def train_actor_ar(cfg, resume=False):
 
     trainer, ckpt_path = build_trainer(
         cfg, tcfg, cfg['actor']['name'] + '-AR', f"./models/{cfg['actor']['name']}-AR",
-        monitor='val/mean_eq', mode='max', resume=resume,
+        # Excess over buy-and-hold, not raw equity. On a trending split the two
+        # rank checkpoints differently, and a long-only policy maximises the
+        # second by construction while scoring exactly 0 on the first.
+        monitor='val/excess_eq', mode='max', resume=resume,
     )
     trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
 
@@ -181,7 +184,9 @@ def train_rl(cfg, resume=False):
 
     trainer, ckpt_path = build_trainer(
         cfg, tcfg, rcfg['name'], f"./models/{rcfg['name']}",
-        monitor='val/mean_eq', mode='max', resume=resume,
+        # See train_actor_ar: selecting on val/mean_eq rewards the buy-and-hold
+        # collapse RL falls into here rather than catching it.
+        monitor='val/excess_eq', mode='max', resume=resume,
         gradient_clip_val=None,
     )
     trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)

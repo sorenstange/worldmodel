@@ -59,11 +59,15 @@ CFG = {
         'name': 'actor-rl', 'from_ar': False, 'objective': 'ppo', 'env': 'real',
         'dream_prob': 0.5, 'dream_temp': 1.0,
         'ctx_len': 2, 'pred_steps': 4, 'act_temp': 1.0, 'disable_dropout': True,
-        'gamma': 1.0, 'gae_lambda': 0.5,
-        'reward': {'downside_coef': 0.0, 'max_change': None, 'turnover_penalty': 0.0},
+        'gamma': 1.0, 'gae_lambda': 0.0,
+        'reward': {'scale': 1e4, 'demean': 'ema', 'drift_beta': 0.99, 'drift': 0.0,
+                   'benchmark': 'bh', 'downside_coef': 0.0, 'max_change': None,
+                   'turnover_penalty': 0.0},
         'ppo': {'clip': 0.2, 'epochs': 2, 'minibatch': 2, 'vf_coef': 0.5,
-                'ent_coef': 0.001, 'kl_coef': 0.02, 'norm_adv': True, 'target_kl': None},
-        'analytic': {'objective': 'logeq', 'ent_coef': 0.0, 'kl_coef': 0.02},
+                'ent_coef': 0.001, 'kl_coef': 0.02, 'norm_adv': True,
+                'center_adv': True, 'target_kl': None},
+        'analytic': {'objective': 'logeq', 'obj_scale': 1.0, 'ent_coef': 0.0,
+                     'kl_coef': 1.0},
         'critic': {'detach_trunk': False, 'warmup_updates': 0},
         'training': {'lr': 2e-5, 'weight_decay': 0.01, 'warmup_steps': 5,
                      'sched_steps': 50, 'epochs': 1, 'batch_size': B,
@@ -376,15 +380,73 @@ def main():
         with torch.no_grad():
             roll = rl.rollout(batch, CTX, STEPS)
             p = rl._realised(batch, roll, dream=False)
-            r, dE = rl._rewards(roll['action'], p)
+            r, dE, dE_raw = rl._rewards(roll['action'], p)
         eq(r.shape, (B, STEPS), 'rewards')
         finite(r, 'rewards')
-        # The reward path and the backtest must charge identical commission.
+        finite(dE, 'shaped growth factors')
+        # dE_raw is the REAL path, so it must charge exactly the commission the
+        # backtest charges -- the shaping must never touch what gets reported.
         act0 = torch.zeros((B, 1))
         _, e = equity(torch.cat([act0, roll['action'].squeeze(-1)], dim=1), p, c=rl.commission)
-        assert torch.allclose(r.sum(dim=-1).exp(), e, atol=1e-5), 'reward sum is not log end-equity'
+        assert torch.allclose(dE_raw.log().sum(dim=-1).exp(), e, atol=1e-5), \
+            'dE_raw is not the backtest equity path'
         rl.train()
-    check('reward sums to log terminal equity', t_reward)
+    check('raw reward path matches the backtest equity', t_reward)
+
+    def t_reward_unshaped():
+        # With every shaping term off, the reward must reduce to the old
+        # definition exactly: the undiscounted sum IS log terminal equity, which
+        # is what makes gamma = 1 correct rather than a hyperparameter.
+        c = copy.deepcopy(CFG)
+        c['rl']['reward'].update(scale=1.0, demean='none', benchmark='none')
+        m = ActorRL(c, jepa).eval()
+        with torch.no_grad():
+            roll = m.rollout(batch, CTX, STEPS)
+            p = m._realised(batch, roll, dream=False)
+            r, _, _ = m._rewards(roll['action'], p)
+        act0 = torch.zeros((B, 1))
+        _, e = equity(torch.cat([act0, roll['action'].squeeze(-1)], dim=1), p, c=m.commission)
+        assert torch.allclose(r.sum(dim=-1).exp(), e, atol=1e-5), 'reward sum is not log end-equity'
+    check('unshaped reward sums to log terminal equity', t_reward_unshaped)
+
+    def t_benchmark():
+        # (B) The whole point: under the buy-and-hold benchmark, always-long
+        # earns EXACTLY zero. If this ever stops holding, the attractor is back.
+        c = copy.deepcopy(CFG)
+        c['rl']['reward'].update(demean='none', benchmark='bh')
+        m = ActorRL(c, jepa).eval()
+        long_only = torch.ones(B, STEPS, 1)
+        p = batch['return_raw'][:, CTX:CTX + STEPS].squeeze(-1)
+        with torch.no_grad():
+            r, dE, _ = m._rewards(long_only, p)
+        assert r.abs().max() < 1e-4, f'buy-and-hold scores {r.abs().max():.3e}, not 0'
+        assert torch.allclose(dE, torch.ones_like(dE), atol=1e-6)
+        # A policy that does something else must not also score zero.
+        with torch.no_grad():
+            r2, _, _ = m._rewards(torch.zeros(B, STEPS, 1), p)
+        assert r2.abs().max() > 1e-3, 'benchmark is not discriminating'
+    check('buy-and-hold scores exactly zero under the bh benchmark', t_benchmark)
+
+    def t_demean():
+        # (A) Drift removal has to shrink the reward a CONSTANT allocation earns
+        # on a trending stream -- that reward is the buy-and-hold attractor.
+        c = copy.deepcopy(CFG)
+        c['rl']['reward'].update(demean='ema', benchmark='none', drift_beta=0.0)
+        m = ActorRL(c, jepa)
+        m.train()                       # the EMA only updates while training
+        long_only = torch.ones(B, STEPS, 1)
+        trend = torch.full((B, STEPS), 0.01)      # +1% every window
+        with torch.no_grad():
+            m._rewards(long_only, trend)          # seed the estimate
+            r_dm, _, _ = m._rewards(long_only, trend)
+        c2 = copy.deepcopy(CFG)
+        c2['rl']['reward'].update(demean='none', benchmark='none')
+        with torch.no_grad():
+            r_raw, _, _ = ActorRL(c2, jepa)._rewards(long_only, trend)
+        assert abs(float(r_dm.mean())) < 0.05 * abs(float(r_raw.mean())), \
+            f'demeaned reward {float(r_dm.mean()):.3f} vs raw {float(r_raw.mean()):.3f}'
+        assert float(m.drift_ema) > 0, 'drift estimate did not track the trend'
+    check('drift removal neutralises a constant allocation', t_demean)
 
     def t_gae():
         rew, val = torch.randn(3, 5), torch.randn(3, 5)
@@ -394,7 +456,9 @@ def main():
         nxt = torch.cat([val[:, 1:], torch.zeros(3, 1)], dim=1)
         assert torch.allclose(adv, rew + nxt - val, atol=1e-6)
         assert torch.allclose(ret, adv + val, atol=1e-6)
-        rl.gae_lambda = 0.5
+        # (E) Per-timestep centring must leave nothing systematic behind.
+        centred = adv - adv.mean(dim=0, keepdim=True)
+        assert centred.mean(dim=0).abs().max() < 1e-6
     check('GAE reduces to the TD residual at lambda = 0', t_gae)
 
     def t_sortino():
@@ -413,7 +477,7 @@ def main():
         roll = rl.rollout(batch, CTX, STEPS, decode='expected', detach_actions=False)
         assert roll['action'].requires_grad, 'analytic path is detached'
         p = rl._realised(batch, roll, dream=False)
-        r, _ = rl._rewards(roll['action'], p)
+        r, _, _ = rl._rewards(roll['action'], p)
         (-r.sum(dim=1).mean()).backward()
         g = rl.actor_head[-1].weight.grad
         assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0

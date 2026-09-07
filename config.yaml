@@ -145,25 +145,58 @@ rl:
   disable_dropout: true # PPO's ratio is only a trust region if collection and
                         # update see the same network
   gamma: 1.0            # the undiscounted sum of log returns IS terminal equity
-  gae_lambda: 0.5       # an action only influences its own step and the next
-                        # turnover charge; long lambda adds noise, not signal
+  gae_lambda: 0.0       # an action influences its own step and the next
+                        # turnover charge, and nothing further; anything above
+                        # ~0.2 folds in market noise it had no say in
   reward:
-    downside_coef: 0.0  # optional per-step penalty on negative log growth
+    # Rewards are log growth in BASIS POINTS. Raw 15m log growth is O(1e-4), so
+    # at scale 1.0 every coefficient in this block -- and kl_coef/ent_coef below
+    # -- sits orders of magnitude above the objective it regularises.
+    scale: 10000.0
+    # Unconditional drift removal. Without it the training split's drift IS the
+    # objective: Kelly f* = mu/sigma^2 is 1.08 over [data.training_interval],
+    # which the [-1, 1] box clips to +1, so "always fully long" is the exact
+    # argmax of undiscounted log equity. It is -1.60 over [data.test_interval],
+    # where the drift flips sign. 'ema' subtracts a running mean of the realised
+    # window return, so a constant allocation earns ~0 and only timing pays.
+    # 'const' uses `drift` below instead; 'none' restores the old behaviour.
+    demean: 'ema'
+    drift_beta: 0.99    # EMA rate, shared with the return-scale tracker
+    drift: 0.0          # only used by demean: 'const'
+    # 'bh' scores log(dE / dE_buy_and_hold), so an episode return is
+    # log(E_actor / E_bh) -- the primary definition of done -- and buy-and-hold
+    # scores exactly 0 instead of winning. This is PPO's missing baseline. Note
+    # it leaves the analytic-logeq optimum unchanged (a constant offset in log
+    # space); `demean` is what moves that one. Use both.
+    benchmark: 'bh'     # 'none' | 'bh'
+    # Both shaping terms are LINEAR in the reward's own units (bps). Quadratic
+    # shaping cannot be scale-coherent -- the coefficient ends up carrying units.
+    downside_coef: 0.0  # loss aversion: 1.0 = a bp lost counts twice a bp gained
     max_change: null    # optional turnover cap, mirroring the oracle's
-    turnover_penalty: 0.0
+    turnover_penalty: 0.0  # extra bps per unit of change beyond the cap
+                           # (commission_value is 5 bps, for scale)
   ppo:
     clip: 0.2
     epochs: 4
     minibatch: 64       # over SEQUENCES; the time axis stays intact
-    vf_coef: 0.5
+    vf_coef: 0.5        # the value target is normalised, so this is O(1) vs O(1)
     ent_coef: 0.001
-    kl_coef: 0.02       # to the frozen BC policy -- the load-bearing regulariser
+    kl_coef: 0.02       # to the frozen BC policy -- the load-bearing
+                        # regulariser. norm_adv makes the surrogate O(1), so
+                        # this is ~2% of it; 0.02-0.5 is the range worth sweeping
     norm_adv: true
+    center_adv: true    # subtract the batch mean at each timestep -- a free
+                        # time-varying baseline the zero-init critic cannot give
     target_kl: null     # e.g. 0.02 to cut the inner loop short
   analytic:
-    objective: 'logeq'  # 'logeq' | 'sortino'
+    objective: 'logeq'  # 'logeq' (bps/step, O(0.3)) | 'sortino' (dimensionless
+                        # per-step ratio, O(0.01) -- two orders smaller, so
+                        # raise obj_scale ~100x when switching to it)
+    obj_scale: 1.0
     ent_coef: 0.0
-    kl_coef: 0.02
+    kl_coef: 1.0        # was 0.02 against an objective of O(1e-3): the KL was
+                        # ~20x the entire objective and the run could not move
+
   critic:
     detach_trunk: false
     warmup_updates: 200 # critic-only updates before the policy starts moving

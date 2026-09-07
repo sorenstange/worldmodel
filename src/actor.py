@@ -129,10 +129,22 @@ class Actor(L.LightningModule):
         # between the two IS the behaviour-cloning train/test gap.
         tf = self.backtest(batch, teacher_force=True)
 
+        a = b['action'].squeeze(-1)
+        e = b['end_equity'].clamp_min(1e-6)
+        bh = b['bh_end_equity'].clamp_min(1e-6)
+
         self.log_dict({
-            'val/mean_eq': torch.mean(b['end_equity']),
+            'val/mean_eq': torch.mean(e),
             'val/opt_eq': torch.mean(b['opt_end_equity']),
-            'val/bh_eq': torch.mean(b['bh_end_equity']),
+            'val/bh_eq': torch.mean(bh),
+            # log(E_actor / E_bh). mean_eq cannot separate skill from market
+            # drift -- a policy that outputs +1 everywhere IS buy-and-hold and
+            # scores exactly bh_eq -- so this is what ActorAR and ActorRL are
+            # checkpointed and early-stopped on. Zero means "matched the market".
+            'val/excess_eq': torch.mean(e.log() - bh.log()),
+            # The collapse detector: +1 means the policy has become long-only.
+            'val/mean_alloc': a.mean(),
+            'val/abs_alloc': a.abs().mean(),
             'val/mean_eq_tf': torch.mean(tf['end_equity']),
         }, on_step=False, on_epoch=True, prog_bar=True)
 
